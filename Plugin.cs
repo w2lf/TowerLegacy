@@ -119,7 +119,7 @@ public class Plugin : BasePlugin
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
 
-                        Harmony.Patch(m, postfix: new HarmonyMethod(typeof(Plugin), nameof(LocPostfix)));
+                        Harmony.Patch(m, prefix: new HarmonyMethod(typeof(Plugin), nameof(LocPrefix)));
                         Log.LogInfo($"[LocPatch] Patched {type.FullName}.{m.Name}");
                         patched++;
                     }
@@ -139,11 +139,11 @@ public class Plugin : BasePlugin
                         try
                         {
                             if (m.Name.Length > 4) continue; // obfuscated names are short
-                            if (m.ReturnType != typeof(string)) continue;
+                            if (m.ReturnType != typeof(string)) return;
                             var parms = m.GetParameters();
                             if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
 
-                            Harmony.Patch(m, postfix: new HarmonyMethod(typeof(Plugin), nameof(LocPostfix)));
+                            Harmony.Patch(m, prefix: new HarmonyMethod(typeof(Plugin), nameof(LocPrefix)));
                             Log.LogInfo($"[LocPatch] Patched (fallback) {type.FullName}.{m.Name}");
                             patched++;
                         }
@@ -157,20 +157,24 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
-    public static void LocPostfix(string __0, ref string __result)
+    /// <summary>
+    /// PREFIX — only fires when the key is one of our overrides.
+    /// Returns false to skip the original entirely (no Il2Cpp marshal on return path).
+    /// Returns true for everything else — original runs normally, zero overhead.
+    /// </summary>
+    public static bool LocPrefix(string __0, ref string __result)
     {
         try
         {
-            // Guard: null result means the native method returned a null Il2Cpp string —
-            // do not touch it, otherwise Il2CppStringToManagedIntPtr will throw.
-            if (__result == null) return;
             if (__0 != null && LocOverrides.TryGetValue(__0, out var val))
             {
                 Log.LogInfo($"[LocPatch] Intercepted key '{__0}' → '{val}'");
                 __result = val;
+                return false; // skip original — avoids marshal of native return ptr
             }
         }
         catch { }
+        return true; // let original run normally
     }
 }
 

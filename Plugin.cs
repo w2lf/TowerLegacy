@@ -44,35 +44,54 @@ public class Plugin : BasePlugin
         SlotDumped = true;
         try
         {
-            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
-                .FirstOrDefault(a => a.GetName().Name == "Hex");
-            if (hexAsm == null) { Log.LogWarning("[SlotDump] Hex asm not found."); return; }
+            // Log every loaded assembly name so we know what's available
+            var allAsms = AppDomain.CurrentDomain.GetAssemblies();
+            Log.LogInfo($"[SlotDump] Loaded assemblies ({allAsms.Length}):");
+            foreach (var a in allAsms)
+                Log.LogInfo($"[SlotDump]   {a.GetName().Name}");
 
             int found = 0;
-            foreach (var type in hexAsm.GetTypes())
+            foreach (var asm in allAsms)
             {
-                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
+                // Skip obviously irrelevant assemblies to avoid noise
+                var asmName = asm.GetName().Name ?? "";
+                if (asmName.StartsWith("System") || asmName.StartsWith("Microsoft") ||
+                    asmName.StartsWith("mscorlib") || asmName.StartsWith("BepInEx") ||
+                    asmName.StartsWith("Il2Cpp") || asmName.StartsWith("Mono") ||
+                    asmName.StartsWith("Unity") || asmName == "TowerLegacy")
+                    continue;
+
+                try
                 {
-                    try
+                    foreach (var type in asm.GetTypes())
                     {
-                        var parms = m.GetParameters();
-                        // Match by name to avoid IL2CPP managed/native type identity mismatch
-                        bool takesFla = parms.Any(p =>
-                            p.ParameterType.Name == "FractionLobbyAsset" ||
-                            p.ParameterType.FullName?.Contains("FractionLobbyAsset") == true);
-                        if (!takesFla) continue;
+                        foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
+                        {
+                            try
+                            {
+                                var parms = m.GetParameters();
+                                bool takesFla = parms.Any(p =>
+                                    p.ParameterType.Name == "FractionLobbyAsset" ||
+                                    p.ParameterType.FullName?.Contains("FractionLobbyAsset") == true);
+                                if (!takesFla) continue;
 
-                        Log.LogInfo($"[SlotDump] {type.Name}.{m.Name}({string.Join(", ", parms.Select(p => p.ParameterType.Name + " " + p.Name))})");
-                        found++;
+                                // Skip property setters — they can't be patched
+                                if (m.Name.StartsWith("set_")) continue;
 
-                        var postfix = new HarmonyMethod(typeof(Plugin), nameof(SlotSetterPostfix));
-                        try { Harmony.Patch(m, postfix: postfix); }
-                        catch (Exception pe) { Log.LogWarning($"[SlotDump] Could not patch {type.Name}.{m.Name}: {pe.Message}"); }
+                                Log.LogInfo($"[SlotDump] [{asmName}] {type.Name}.{m.Name}({string.Join(", ", parms.Select(p => p.ParameterType.Name + " " + p.Name))})");
+                                found++;
+
+                                var postfix = new HarmonyMethod(typeof(Plugin), nameof(SlotSetterPostfix));
+                                try { Harmony.Patch(m, postfix: postfix); }
+                                catch (Exception pe) { Log.LogWarning($"[SlotDump] Cannot patch {type.Name}.{m.Name}: {pe.Message}"); }
+                            }
+                            catch { }
+                        }
                     }
-                    catch { }
                 }
+                catch { }
             }
-            Log.LogInfo($"[SlotDump] Done. {found} method(s) found and patched.");
+            Log.LogInfo($"[SlotDump] Done. {found} patchable method(s) found.");
         }
         catch (Exception ex) { Log.LogWarning($"[SlotDump] Failed: {ex.Message}"); }
     }

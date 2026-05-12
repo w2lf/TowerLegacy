@@ -35,6 +35,24 @@ public class Plugin : BasePlugin
     public static readonly HashSet<string> SkipFields = new HashSet<string>(StringComparer.Ordinal)
         { "pooledPtr", "isWrapped" };
 
+    // Methods known to crash when patched via HarmonyX on IL2CPP trampolines.
+    // Add any obfuscated name that shows up in a DMD crash to this list.
+    static readonly HashSet<string> SkipMethodNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "IsInvoking", "CompareTag",
+        // gla crashes with NullReferenceException inside its IL2CPP-to-managed
+        // trampoline (DMDdaglada) — the object is not initialised when it fires.
+        "gla"
+    };
+
+    // Type name substrings that are strong signals for the fraction-availability
+    // check. We patch ONLY types whose name contains one of these, which reduces
+    // the patch surface from 50 random methods down to a handful.
+    static readonly string[] HubTypeHints =
+    {
+        "GameHub", "GameMode", "Lobby", "Fraction", "Hub", "Matchmak"
+    };
+
     public override void Load()
     {
         Log = base.Log;
@@ -45,14 +63,12 @@ public class Plugin : BasePlugin
 
         DumpFractionLobbyAssetFields();
         DumpLocMethods();
+        DumpHubAvailabilityMethods(); // probe: logs candidates so we can identify the exact type next run
 
         Log.LogInfo("TowerLegacy loaded.");
     }
 
     // ── Early DB injection ──────────────────────────────────────────────────────
-    // cjv.set_bxjy is a field accessor — IL2CPP field accessors cannot be
-    // Harmony-patched (they have no managed trampoline). We use SceneManager
-    // .sceneLoaded instead, which fires after every scene load and is always safe.
     static void PatchEarlyDbTrigger()
     {
         try
@@ -75,10 +91,9 @@ public class Plugin : BasePlugin
     }
 
     // ── GameHub availability patch ──────────────────────────────────────────────
-    // Scans the Hex assembly for bool(string) methods that could be the fraction
-    // availability check. We skip Unity engine types entirely to avoid the flood
-    // of HarmonyX warnings caused by patching inherited methods like IsInvoking
-    // and CompareTag on every MonoBehaviour subclass.
+    // Strategy: patch ONLY bool(string) methods on types whose name hints at
+    // GameHub / lobby / fraction logic. This avoids patching deep-engine methods
+    // like gla (on some unrelated type) whose IL2CPP trampolines crash on invoke.
     static void PatchGameHubAvailability()
     {
         try
@@ -88,39 +103,33 @@ public class Plugin : BasePlugin
             if (hexAsm == null) { Log.LogWarning("[HubPatch] Hex assembly not found."); return; }
 
             int patched = 0;
-            const int MaxPatches = 50; // safety cap
             var postfix = new HarmonyMethod(typeof(Plugin), nameof(FractionAvailablePostfix));
-
-            // Methods to skip by name — Unity base-class methods that are abstract/virtual
-            // and produce a warning on every subclass when patched.
-            var skipByName = new HashSet<string>(StringComparer.Ordinal)
-            {
-                "IsInvoking", "CompareTag"
-            };
 
             foreach (var type in hexAsm.GetTypes())
             {
-                if (patched >= MaxPatches) break;
-
-                // Skip any type whose declaring namespace is a Unity engine namespace.
                 var ns = type.Namespace ?? "";
+                // Skip Unity namespaces entirely.
                 if (ns.StartsWith("UnityEngine", StringComparison.Ordinal) ||
-                    ns.StartsWith("Unity.",      StringComparison.Ordinal)  ||
-                    ns.StartsWith("TMPro",       StringComparison.Ordinal)  ||
+                    ns.StartsWith("Unity.",       StringComparison.Ordinal) ||
+                    ns.StartsWith("TMPro",        StringComparison.Ordinal) ||
                     ns.StartsWith("UnityExplorer", StringComparison.Ordinal))
                     continue;
+
+                // Only consider types that look like hub/lobby/fraction logic.
+                var typeName = type.Name ?? "";
+                bool isHubType = HubTypeHints.Any(h =>
+                    typeName.IndexOf(h, StringComparison.OrdinalIgnoreCase) >= 0);
+                if (!isHubType) continue;
 
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                    BindingFlags.Instance | BindingFlags.Static))
                 {
-                    if (patched >= MaxPatches) break;
                     try
                     {
                         if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
                         if (m.ReturnType != typeof(bool)) continue;
-                        if (skipByName.Contains(m.Name)) continue;
+                        if (SkipMethodNames.Contains(m.Name)) continue;
 
-                        // Also skip if the method's declaring type is a Unity engine type.
                         var declNs = m.DeclaringType?.Namespace ?? "";
                         if (declNs.StartsWith("UnityEngine", StringComparison.Ordinal) ||
                             declNs.StartsWith("Unity.",      StringComparison.Ordinal))
@@ -131,32 +140,62 @@ public class Plugin : BasePlugin
 
                         Harmony.Patch(m, postfix: postfix);
                         patched++;
+                        Log.LogInfo($"[HubPatch] Patched {type.Name}.{m.Name}");
                     }
                     catch { }
                 }
             }
 
-            Log.LogInfo($"[HubPatch] Patched {patched} bool(string) methods for tower availability.");
+            Log.LogInfo($"[HubPatch] Patched {patched} hub/lobby bool(string) methods.");
         }
         catch (Exception ex) { Log.LogWarning($"[HubPatch] {ex.Message}"); }
     }
 
-    // Postfix: if the method returned false and the argument is "tower", flip to true.
-    // __instance may be null for static methods or uninitialized IL2CPP objects —
-    // the null guard prevents the trampoline NullReferenceException seen in the log.
-    public static void FractionAvailablePostfix(object __instance, string __0, ref bool __result)
+    public static void FractionAvailablePostfix(string __0, ref bool __result)
     {
         try
         {
-            if (__instance == null && !(__instance is null)) return; // skip uninitialised Il2Cpp objects
             if (!__result && __0 == "tower")
             {
                 __result = true;
                 Plugin.Log.LogInfo("[HubPatch] Overrode availability check: tower -> true");
             }
         }
-        catch (NullReferenceException) { /* uninitialised IL2CPP object — silently skip */ }
         catch { }
+    }
+
+    // ── Probe: dump all bool(string) candidates so we can identify the exact one ─
+    static void DumpHubAvailabilityMethods()
+    {
+        try
+        {
+            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Hex");
+            if (hexAsm == null) return;
+
+            Log.LogInfo("[HubDump] All Hex bool(string) methods:");
+            foreach (var type in hexAsm.GetTypes())
+            {
+                var ns = type.Namespace ?? "";
+                if (ns.StartsWith("UnityEngine", StringComparison.Ordinal) ||
+                    ns.StartsWith("Unity.",       StringComparison.Ordinal)) continue;
+
+                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                   BindingFlags.Instance | BindingFlags.Static))
+                {
+                    try
+                    {
+                        if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
+                        if (m.ReturnType != typeof(bool)) continue;
+                        var parms = m.GetParameters();
+                        if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
+                        Log.LogInfo($"[HubDump] {type.Name}.{m.Name}  static={m.IsStatic}  decl={m.DeclaringType?.Name}");
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch (Exception ex) { Log.LogWarning($"[HubDump] {ex.Message}"); }
     }
 
     static void DumpFractionLobbyAssetFields()

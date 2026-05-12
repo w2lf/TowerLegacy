@@ -37,14 +37,68 @@ public class Plugin : BasePlugin
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
 
+        DumpFractionLobbyAssetFields();
+        DumpLocMethods();
         PatchLocalization();
 
         Log.LogInfo("TowerLegacy loaded.");
     }
 
+    // ── Diagnostic: dump FractionLobbyAsset fields so we know the real sid field name ──
+    static void DumpFractionLobbyAssetFields()
+    {
+        try
+        {
+            Log.LogInfo("[Dump] FractionLobbyAsset fields:");
+            foreach (var f in typeof(FractionLobbyAsset).GetFields(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                Log.LogInfo($"[Dump]   field  {f.FieldType.Name} {f.Name}");
+            }
+            Log.LogInfo("[Dump] FractionLobbyAsset properties:");
+            foreach (var p in typeof(FractionLobbyAsset).GetProperties(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                Log.LogInfo($"[Dump]   prop   {p.PropertyType.Name} {p.Name}  get={p.CanRead} set={p.CanWrite}");
+            }
+        }
+        catch (Exception ex) { Log.LogWarning($"[Dump] {ex.Message}"); }
+    }
+
+    // ── Diagnostic: dump all (string)->string methods in Hex so we know real loc method names ──
+    static void DumpLocMethods()
+    {
+        try
+        {
+            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Hex");
+            if (hexAsm == null) { Log.LogWarning("[LocDump] Hex assembly not found."); return; }
+
+            int count = 0;
+            foreach (var type in hexAsm.GetTypes())
+            {
+                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                   BindingFlags.Instance | BindingFlags.Static))
+                {
+                    try
+                    {
+                        if (m.IsAbstract) continue;
+                        if (m.ReturnType != typeof(string)) continue;
+                        var parms = m.GetParameters();
+                        if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
+                        if (m.Name.StartsWith("set_") || m.Name.StartsWith("get_")) continue;
+                        Log.LogInfo($"[LocDump] {type.Name}.{m.Name}(string) : string  static={m.IsStatic}");
+                        count++;
+                    }
+                    catch { }
+                }
+            }
+            Log.LogInfo($"[LocDump] Total (string)->string methods: {count}");
+        }
+        catch (Exception ex) { Log.LogWarning($"[LocDump] {ex.Message}"); }
+    }
+
     // ── Localization patch ────────────────────────────────────────────────────
-    // Only patch the 3 known obfuscated loc methods (cnqevl, cnqcfg, cnqszb).
-    // Patching all 640 string->string methods caused runtime crashes.
     internal static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
     {
         { "tower_name",   "Tower City" },
@@ -52,9 +106,9 @@ public class Plugin : BasePlugin
         { "tower_select", "Select Tower City" },
     };
 
-    // Names of the obfuscated localization methods found in the Hex assembly.
-    static readonly string[] LocMethodNames = { "cnqevl", "cnqcfg", "cnqszb" };
-
+    // Will be populated after we know real method names from the dump above.
+    // For now patch ALL (string)->string in Hex but limit to methods whose
+    // declaring type name starts with a lowercase letter (obfuscated classes only).
     static void PatchLocalization()
     {
         try
@@ -68,15 +122,19 @@ public class Plugin : BasePlugin
 
             foreach (var type in hexAsm.GetTypes())
             {
+                // Only obfuscated types (lowercase first char)
+                if (type.Name.Length == 0 || !char.IsLower(type.Name[0])) continue;
+
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                    BindingFlags.Instance | BindingFlags.Static))
                 {
                     try
                     {
-                        if (!LocMethodNames.Contains(m.Name)) continue;
+                        if (m.IsAbstract) continue;
                         if (m.ReturnType != typeof(string)) continue;
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
+                        if (m.Name.StartsWith("set_") || m.Name.StartsWith("get_")) continue;
 
                         Harmony.Patch(m, postfix: postfix);
                         patched++;
@@ -163,25 +221,42 @@ public static class ScFractionSelect_qwa_Patch
     internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src)
     {
         var slot = new FractionLobbyAsset();
-        foreach (var f in typeof(FractionLobbyAsset).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+
+        // Copy all fields
+        foreach (var f in typeof(FractionLobbyAsset).GetFields(
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
-        foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+
+        // Copy writable properties
+        foreach (var p in typeof(FractionLobbyAsset).GetProperties(
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
 
-        // Set sid via the backing field directly (get_sid is a field accessor, can't be harmony-patched)
-        var sidField = typeof(FractionLobbyAsset).GetField("sid",
-            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-        if (sidField != null)
+        // Try to set sid via every string field — log which fields hold "human" so we know the real name
+        bool sidSet = false;
+        foreach (var f in typeof(FractionLobbyAsset).GetFields(
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
-            sidField.SetValue(slot, "tower");
-            Plugin.Log.LogInfo("[TowerInject] Set sid backing field to 'tower' directly.");
+            if (f.FieldType != typeof(string)) continue;
+            try
+            {
+                var val = f.GetValue(slot) as string;
+                if (val == "human")
+                {
+                    f.SetValue(slot, "tower");
+                    Plugin.Log.LogInfo($"[TowerInject] Set field '{f.Name}' (was 'human') -> 'tower'");
+                    sidSet = true;
+                }
+            }
+            catch { }
         }
-        else
+
+        if (!sidSet)
         {
-            // Fallback: register ptr so a postfix could intercept if needed
+            // Register ptr fallback
             var slotPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(slot);
             Plugin.TowerSlotPtrs.Add(slotPtr);
-            Plugin.Log.LogInfo($"[TowerInject] Tower slot ptr registered (sid field not found): 0x{slotPtr:X}");
+            Plugin.Log.LogInfo($"[TowerInject] No 'human' string field found; ptr registered 0x{slotPtr:X}");
         }
 
         return slot;
@@ -208,7 +283,7 @@ public static class ScFractionSelect_qwb_Patch
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
             __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=tower via field set).");
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }

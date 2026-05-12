@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
@@ -74,20 +73,6 @@ public class Plugin : BasePlugin
         catch { }
     }
 
-    // ── Safe native string read (avoids Il2CppStringToManaged crash) ─────────
-    // IL2CPP strings: [object header (16)] [length (int32)] [chars (UTF-16)]
-    static string SafeReadNativeString(IntPtr ptr)
-    {
-        try
-        {
-            if (ptr == IntPtr.Zero) return null;
-            int len = Marshal.ReadInt32(ptr, 16);
-            if (len <= 0 || len > 2048) return null;
-            return Marshal.PtrToStringUni(ptr + 20, len);
-        }
-        catch { return null; }
-    }
-
     // ── Localization patch ────────────────────────────────────────────────────
     internal static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
     {
@@ -118,7 +103,6 @@ public class Plugin : BasePlugin
                         if (m.ReturnType != typeof(string)) continue;
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
-                        // skip property accessors unrelated to lookups (getters/setters for string fields)
                         if (m.Name.StartsWith("set_")) continue;
 
                         Harmony.Patch(m, prefix: prefix);
@@ -133,15 +117,14 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
-    public static bool LocPrefix(IntPtr __0, ref string __result)
+    // Harmony passes the already-marshalled managed string — just accept string directly.
+    public static bool LocPrefix(string __0, ref string __result)
     {
         try
         {
-            if (__0 == IntPtr.Zero) return true;
-            var key = SafeReadNativeString(__0);
-            if (key != null && LocOverrides.TryGetValue(key, out var val))
+            if (__0 != null && LocOverrides.TryGetValue(__0, out var val))
             {
-                Log.LogInfo($"[LocPatch] Intercepted key '{key}' → '{val}'");
+                Log.LogInfo($"[LocPatch] Intercepted key '{__0}' → '{val}'");
                 __result = val;
                 return false;
             }

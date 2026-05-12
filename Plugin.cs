@@ -39,30 +39,84 @@ public class Plugin : BasePlugin
 }
 
 // ── FACTION DEFINITION ────────────────────────────────────────────────────────
-// Edit these to customise your faction. String values that start with a real
-// localisation key will be resolved by the game; plain strings are shown as-is
-// because we patch FractionConfig.get_name / get_desc below.
 internal static class TowerFaction
 {
-    // ── Config (game DB) ──────────────────────────────────────────────────
     public const string Id           = "tower";
     public const string DisplayName  = "Tower City";
     public const string Desc         = "Masters of stone and sorcery, the Tower City mages command arcane constructs and disciplined soldiers.";
     public const string NarrativeDesc= "From their obsidian spires, the Tower City sages watch the horizon for enemies who dare challenge their dominion.";
-    public const string IconKey      = "fraction_human";   // reuse human sprite key until we have our own
+    public const string IconKey      = "fraction_human";
     public const string Biome        = "Snow";
-    public const string CityKey      = "human_city";       // reuse human city model for now
+    public const string CityKey      = "human_city";
     public const string ResourceName = "crystals";
-
-    // Hero ids to assign. Keep human heroes for now; swap later with custom ids.
-    public static readonly string[] Heroes = { };  // empty = inherit human's list
-
-    // City name pool shown on the map.
+    public static readonly string[] Heroes    = { };
     public static readonly string[] CityNames =
     {
         "Arcantum", "Spire's Edge", "Vorath Keep", "Crystalhold",
         "Ebonveil", "The Bastion", "Coldforge", "Mirethian",
     };
+
+    // Localization keys the game will request for this faction.
+    // We intercept them in LocalizationPatch and return the plain strings above.
+    public const string KeyName          = "tower_name";
+    public const string KeyDesc          = "tower_desc";
+    public const string KeyNarrativeDesc = "tower_narrative_desc";
+    public const string KeyCity          = "tower_city";
+
+    public static bool TryGetLocalized(string key, out string value)
+    {
+        switch (key)
+        {
+            case KeyName:          value = DisplayName;   return true;
+            case KeyDesc:          value = Desc;          return true;
+            case KeyNarrativeDesc: value = NarrativeDesc; return true;
+            case KeyCity:          value = "Tower City";  return true;
+            default:               value = null;          return false;
+        }
+    }
+}
+
+// ── LOCALIZATION INTERCEPT ─────────────────────────────────────────────────────
+// Patch every possible localization method signature the game might call.
+// The game resolves "{sid}_name" etc. through its loc system.
+// We intercept before the return and substitute our strings.
+
+[HarmonyPatch]
+public static class LocalizationPatch
+{
+    // Find all methods named "Get", "GetString", "Translate" etc. across all types
+    // in the Hex assembly and patch the ones that take a single string key.
+    static IEnumerable<MethodBase> TargetMethods()
+    {
+        var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(a => a.GetName().Name == "Hex");
+        if (hexAsm == null) yield break;
+
+        var candidates = new[] { "Get", "GetString", "Translate", "GetText", "Localize" };
+        foreach (var type in hexAsm.GetTypes())
+        {
+            foreach (var name in candidates)
+            {
+                var m = type.GetMethod(name,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance,
+                    null,
+                    new[] { typeof(string) },
+                    null);
+                if (m != null && m.ReturnType == typeof(string))
+                    yield return m;
+            }
+        }
+    }
+
+    static void Postfix(string __0, ref string __result)
+    {
+        try
+        {
+            if (__0 != null && TowerFaction.TryGetLocalized(__0, out var v))
+                __result = v;
+        }
+        catch { }
+    }
 }
 
 // ── PATCHES ───────────────────────────────────────────────────────────────────
@@ -74,37 +128,6 @@ public static class ScLobby2_Init_Patch
     {
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
-    }
-}
-
-// Override the name/desc properties so plain strings show without localisation.
-[HarmonyPatch(typeof(FractionConfig), "get_name")]
-public static class FractionConfig_get_name_Patch
-{
-    public static void Postfix(FractionConfig __instance, ref string __result)
-    {
-        try { if (__instance?.id == TowerFaction.Id) __result = TowerFaction.DisplayName; }
-        catch { }
-    }
-}
-
-[HarmonyPatch(typeof(FractionConfig), "get_desc")]
-public static class FractionConfig_get_desc_Patch
-{
-    public static void Postfix(FractionConfig __instance, ref string __result)
-    {
-        try { if (__instance?.id == TowerFaction.Id) __result = TowerFaction.Desc; }
-        catch { }
-    }
-}
-
-[HarmonyPatch(typeof(FractionConfig), "get_narrativeDesc")]
-public static class FractionConfig_get_narrativeDesc_Patch
-{
-    public static void Postfix(FractionConfig __instance, ref string __result)
-    {
-        try { if (__instance?.id == TowerFaction.Id) __result = TowerFaction.NarrativeDesc; }
-        catch { }
     }
 }
 
@@ -145,16 +168,24 @@ public static class ScFractionSelect_qwa_Patch
                 IL2CPP.Il2CppObjectBaseToPtrNotNull(newArr));
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
+            // Also inject into dict_ so lookups by sid="tower" succeed.
             var dictFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "dict_");
             var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
             if (dictObjPtr != IntPtr.Zero)
             {
                 var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
-                Plugin.Log.LogInfo($"[TowerInject] dict_ has {dict.Count} entries, skipping tower key insert.");
+                if (!dict.ContainsKey(TowerFaction.Id))
+                {
+                    dict.Add(TowerFaction.Id, slot);
+                    Plugin.Log.LogInfo($"[TowerInject] Added tower to dict_ (now {dict.Count} entries).");
+                }
+                else
+                    Plugin.Log.LogInfo($"[TowerInject] dict_ already has tower ({dict.Count} entries).");
             }
+            else Plugin.Log.LogWarning("[TowerInject] dict_ ptr is zero.");
 
             _injectedQwa = true;
-            Plugin.Log.LogInfo("[TowerInject] Injected tower slot into SoFractions.");
+            Plugin.Log.LogInfo($"[TowerInject] Injected tower slot (sid={TowerFaction.Id}) into SoFractions.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
@@ -162,13 +193,12 @@ public static class ScFractionSelect_qwa_Patch
     internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src)
     {
         var slot = new FractionLobbyAsset();
-        // Copy all fields from human (sprites etc.)
         foreach (var f in typeof(FractionLobbyAsset).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
-        // Keep sid=human so no downstream dict lookup for "tower" crashes.
-        // We distinguish visually via FractionConfig.name patch above.
+        // Give it the tower sid so the UI resolves "tower_name" from the loc system.
+        slot.sid = TowerFaction.Id;
         return slot;
     }
 }
@@ -193,7 +223,7 @@ public static class ScFractionSelect_qwb_Patch
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
             __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
+            Plugin.Log.LogInfo($"[TowerInject] Injected UI slot via qwb (sid={TowerFaction.Id}).");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }
@@ -237,22 +267,21 @@ internal static class TowerDbInjector
             foreach (var p in typeof(FractionConfig).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 try { if (p.CanRead && p.CanWrite) p.SetValue(tower, p.GetValue(humanCfg)); } catch { }
 
-            // ── Apply Tower overrides ─────────────────────────────────────
+            // ── Overrides ─────────────────────────────────────────────
             tower.id           = TowerFaction.Id;
-            tower.name         = TowerFaction.DisplayName;   // raw value; get_name patch also covers UI
-            tower.desc         = TowerFaction.Desc;
-            tower.narrativeDesc= TowerFaction.NarrativeDesc;
-            tower.icon         = TowerFaction.IconKey;
-            tower.biome        = TowerFaction.Biome;
-            tower.city         = TowerFaction.CityKey;
-            tower.resourceName = TowerFaction.ResourceName;
+            // Use loc keys so the localization system (and our patch) resolves them.
+            tower.name          = TowerFaction.KeyName;
+            tower.desc          = TowerFaction.KeyDesc;
+            tower.narrativeDesc = TowerFaction.KeyNarrativeDesc;
+            tower.icon          = TowerFaction.IconKey;
+            tower.biome         = TowerFaction.Biome;
+            tower.city          = TowerFaction.CityKey;
+            tower.resourceName  = TowerFaction.ResourceName;
 
-            // City names
             var cities = new Il2CppCollections.List<string>();
             foreach (var cn in TowerFaction.CityNames) cities.Add(cn);
             tower.cityNames = cities;
 
-            // Heroes — if empty, inherit human's list (already copied above)
             if (TowerFaction.Heroes.Length > 0)
             {
                 var heroes = new Il2CppCollections.List<string>();

@@ -11,6 +11,8 @@ using Hex.GameHub.Lobby.UI;
 using Hex.GameHub.UICommon;
 using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
+using UnityEngine.UI;
+using TMPro;
 using Il2CppCollections = Il2CppSystem.Collections.Generic;
 
 namespace System.Runtime.CompilerServices
@@ -34,18 +36,70 @@ public class Plugin : BasePlugin
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
+        DumpAndPatchSlotSetters();
         Log.LogInfo("TowerLegacy loaded.");
     }
-}
 
-// ── FACTION DEFINITION ────────────────────────────────────────────────────────
-internal static class TowerFaction
-{
-    public const string Id           = "tower";
-    public const string IconKey      = "fraction_human";
-    public const string Biome        = "Snow";
-    public const string ResourceName = "crystals";
-    public static readonly string[] Heroes = { };   // empty = inherit human's heroes
+    // Find every method in ScFractionSlot (the individual card) that takes a
+    // FractionLobbyAsset and patch it so we can see which one writes the name.
+    static bool _slotDumped = false;
+    internal static void DumpAndPatchSlotSetters()
+    {
+        try
+        {
+            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Hex");
+            if (hexAsm == null) return;
+
+            // Dump all types that touch FractionLobbyAsset in their methods.
+            foreach (var type in hexAsm.GetTypes())
+            {
+                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
+                {
+                    try
+                    {
+                        var parms = m.GetParameters();
+                        bool takesFla = parms.Any(p => p.ParameterType == typeof(FractionLobbyAsset));
+                        if (!takesFla) continue;
+
+                        Log.LogInfo($"[SlotDump] {type.Name}.{m.Name}({string.Join(", ", parms.Select(p => p.ParameterType.Name + " " + p.Name))})");
+
+                        // Patch it with a postfix that logs the sid of the asset passed.
+                        var postfix = new HarmonyMethod(typeof(Plugin), nameof(SlotSetterPostfix));
+                        try { Harmony.Patch(m, postfix: postfix); }
+                        catch { /* skip unpatchable */ }
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch (Exception ex) { Log.LogWarning($"[SlotDump] Failed: {ex.Message}"); }
+    }
+
+    // Generic postfix: logs which method was called and the sid of the asset.
+    // __instance may be null for static methods.
+    public static void SlotSetterPostfix(object __instance, FractionLobbyAsset __0)
+    {
+        try
+        {
+            var typeName   = __instance?.GetType().Name ?? "(static)";
+            var sid        = __0?.sid ?? "null";
+            var methodName = new System.Diagnostics.StackFrame(1).GetMethod()?.Name ?? "?";
+            Log.LogInfo($"[SlotCall] {typeName}.{methodName} sid={sid}");
+
+            // Also dump all TMP_Text children so we can see what text is set.
+            if (__instance != null)
+            {
+                var go = (__instance as UnityEngine.MonoBehaviour)?.gameObject;
+                if (go != null)
+                {
+                    foreach (var tmp in go.GetComponentsInChildren<TextMeshProUGUI>())
+                        Log.LogInfo($"[SlotCall]   TMP '{tmp.name}' = \"{tmp.text}\"");
+                }
+            }
+        }
+        catch { }
+    }
 }
 
 // ── PATCHES ───────────────────────────────────────────────────────────────────
@@ -111,7 +165,6 @@ public static class ScFractionSelect_qwa_Patch
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
 
-    // sid stays "human" so all UI dict lookups and LocKit keys keep resolving correctly.
     internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src)
     {
         var slot = new FractionLobbyAsset();
@@ -178,7 +231,7 @@ internal static class TowerDbInjector
             if (humanCfg == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
             Plugin.Log.LogInfo($"[TowerInject] human ok, id={humanCfg.id}");
 
-            if (FindByIdInDict(dictObj, TowerFaction.Id) != null || FindByIdInList(listObj, TowerFaction.Id) != null)
+            if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
 
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
@@ -188,15 +241,12 @@ internal static class TowerDbInjector
             foreach (var p in typeof(FractionConfig).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 try { if (p.CanRead && p.CanWrite) p.SetValue(tower, p.GetValue(humanCfg)); } catch { }
 
-            // ── Overrides ─────────────────────────────────────────────────────
-            tower.id           = TowerFaction.Id;
-            // Keep human's loc keys for name/desc/city so LocKit doesn't break.
-            // We'll patch the display text in a later step once we find the right widget.
-            tower.icon         = TowerFaction.IconKey;
-            tower.biome        = TowerFaction.Biome;
-            tower.resourceName = TowerFaction.ResourceName;
+            tower.id           = "tower";
+            tower.icon         = "fraction_human";
+            tower.biome        = "Snow";
+            tower.resourceName = "crystals";
 
-            // Hard-copy cityNames from human so the array is never null.
+            // Hard-copy cityNames
             var cities = new Il2CppCollections.List<string>();
             if (humanCfg.cityNames != null)
                 for (int i = 0; i < humanCfg.cityNames.Count; i++)
@@ -204,7 +254,7 @@ internal static class TowerDbInjector
             if (cities.Count == 0) cities.Add("Tower City");
             tower.cityNames = cities;
 
-            // Hard-copy heroes from human so the array is never null.
+            // Hard-copy heroes
             var heroes = new Il2CppCollections.List<string>();
             if (humanCfg.heroes != null)
                 for (int i = 0; i < humanCfg.heroes.Count; i++)
@@ -219,7 +269,7 @@ internal static class TowerDbInjector
                             ?? new Il2CppCollections.Dictionary<string, FractionConfig>(((Il2CppSystem.Object)dictObj).Pointer);
 
             typedList.Add(tower);
-            typedDict.Add(TowerFaction.Id, tower);
+            typedDict.Add("tower", tower);
 
             Plugin.DbInjected = true;
             Plugin.Log.LogInfo("[TowerInject] tower injected into DB.");

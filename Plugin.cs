@@ -42,7 +42,7 @@ public class Plugin : BasePlugin
 
         DumpFractionLobbyAssetFields();
         DumpLocMethods();
-        PatchLocalization();
+        // PatchLocalization(); -- disabled: broad IL2CPP Harmony sweep causes native crash on startup
 
         Log.LogInfo("TowerLegacy loaded.");
     }

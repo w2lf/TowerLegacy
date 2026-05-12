@@ -49,9 +49,6 @@ public class Plugin : BasePlugin
     }
 
     // ── Early DB injection: hook the method that fires when Config db is loaded ──
-    // We scan the Hex assembly at runtime for the obfuscated method that logs
-    // "Config db is loaded" so we can inject tower before GameHub runs its
-    // availability check.
     static void PatchEarlyDbTrigger()
     {
         try
@@ -60,29 +57,6 @@ public class Plugin : BasePlugin
                 .FirstOrDefault(a => a.GetName().Name == "Hex");
             if (hexAsm == null) { Log.LogWarning("[EarlyInject] Hex assembly not found."); return; }
 
-            // Scan for any void/bool method whose IL contains the literal string
-            // "Config db is loaded" — used as the trigger point.
-            MethodBase target = null;
-            foreach (var type in hexAsm.GetTypes())
-            {
-                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
-                                                   BindingFlags.Instance | BindingFlags.Static))
-                {
-                    try
-                    {
-                        if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
-                        var body = m.GetMethodBody();
-                        if (body == null) continue;
-                        // Check string tokens in the method body via IL inspection
-                        // (cheap: look for the type's string fields referencing our marker)
-                        // Fallback: patch cjv.bxjy setter — the property that exposes the DB repo.
-                    }
-                    catch { }
-                }
-            }
-
-            // Reliable fallback: patch the static property setter on cjv that assigns bxjy.
-            // This fires exactly once when the game finishes loading the fraction DB.
             var cjvType = hexAsm.GetType("cjv");
             if (cjvType == null) { Log.LogWarning("[EarlyInject] cjv type not found."); return; }
 
@@ -90,7 +64,6 @@ public class Plugin : BasePlugin
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
             if (setter == null)
             {
-                // Try property setter via PropertyInfo
                 var prop = cjvType.GetProperty("bxjy",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
                 if (prop != null) setter = prop.GetSetMethod(true);
@@ -122,9 +95,10 @@ public class Plugin : BasePlugin
     }
 
     // ── GameHub availability patch ──────────────────────────────────────────────
-    // The game checks a set/list of available fraction IDs before the lobby opens.
-    // We scan for the method that logs "fraction {sid} not available" and postfix
-    // it to return true when sid == "tower".
+    // Scans the Hex assembly for bool(string) methods that could be the fraction
+    // availability check. We skip Unity engine types entirely to avoid the flood
+    // of HarmonyX warnings caused by patching inherited methods like IsInvoking
+    // and CompareTag on every MonoBehaviour subclass.
     static void PatchGameHubAvailability()
     {
         try
@@ -134,27 +108,49 @@ public class Plugin : BasePlugin
             if (hexAsm == null) { Log.LogWarning("[HubPatch] Hex assembly not found."); return; }
 
             int patched = 0;
+            const int MaxPatches = 50; // safety cap
             var postfix = new HarmonyMethod(typeof(Plugin), nameof(FractionAvailablePostfix));
 
-            // Target: any method returning bool with a single string parameter whose
-            // name suggests fraction availability (IsFractionAvailable, isFractionEnabled, etc.)
-            // Since the assembly is obfuscated, we match on signature: bool(string) in GameHub types.
+            // Methods to skip by name — Unity base-class methods that are abstract/virtual
+            // and produce a warning on every subclass when patched.
+            var skipByName = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "IsInvoking", "CompareTag"
+            };
+
             foreach (var type in hexAsm.GetTypes())
             {
-                // Only look in types whose namespace or name hints at GameHub/Lobby/Fraction.
-                // Since names are obfuscated, we cast the net to ALL types but limit to
-                // bool(string) methods to keep it tight.
+                if (patched >= MaxPatches) break;
+
+                // Skip any type whose declaring namespace is a Unity engine namespace.
+                // These are re-exposed wrappers and patching them causes the warning spam.
+                var ns = type.Namespace ?? "";
+                if (ns.StartsWith("UnityEngine", StringComparison.Ordinal) ||
+                    ns.StartsWith("Unity.",      StringComparison.Ordinal)  ||
+                    ns.StartsWith("TMPro",       StringComparison.Ordinal)  ||
+                    ns.StartsWith("UnityExplorer", StringComparison.Ordinal))
+                    continue;
+
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                    BindingFlags.Instance | BindingFlags.Static))
                 {
+                    if (patched >= MaxPatches) break;
                     try
                     {
                         if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
                         if (m.ReturnType != typeof(bool)) continue;
+                        if (skipByName.Contains(m.Name)) continue;
+
+                        // Also skip if the method's declaring type is a Unity engine type —
+                        // inherited methods show the declaring type, not the subclass.
+                        var declNs = m.DeclaringType?.Namespace ?? "";
+                        if (declNs.StartsWith("UnityEngine", StringComparison.Ordinal) ||
+                            declNs.StartsWith("Unity.",      StringComparison.Ordinal))
+                            continue;
+
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
-                        // Patch every bool(string) method — the postfix is a no-op unless
-                        // __result is false and the key is "tower", so false positives are safe.
+
                         Harmony.Patch(m, postfix: postfix);
                         patched++;
                     }
@@ -167,10 +163,7 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[HubPatch] {ex.Message}"); }
     }
 
-    // Postfix for all bool(string) methods in Hex.
-    // If the method returned false and the argument is "tower", flip it to true.
-    // This is intentionally broad: the postfix is a guard-first no-op for the
-    // overwhelming majority of calls that don't involve "tower".
+    // Postfix: if the method returned false and the argument is "tower", flip to true.
     public static void FractionAvailablePostfix(string __0, ref bool __result)
     {
         try
@@ -266,7 +259,6 @@ public static class ScLobby2_Init_Patch
     public static void Postfix()
     {
         ScFractionSelect_qwb_Patch._lobbyInjected = false;
-        // Fallback: if early injection via cjv.set_bxjy didn't fire, try now.
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
     }
@@ -403,8 +395,6 @@ public static class ScFractionSelect_qwb_Patch
 
             var newSlot = ScFractionSelect_qwa_Patch.BuildSlot(src);
 
-            // Fresh-list path: assign a brand-new list via ref to avoid IL2Cpp
-            // backing-array mutation errors.
             var freshList = new Il2CppSystem.Collections.Generic.List<FractionLobbyAsset>();
             for (int i = 0; i < __result.Count; i++)
                 freshList.Add(__result[i]);

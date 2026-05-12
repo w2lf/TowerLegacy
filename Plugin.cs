@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -10,6 +9,7 @@ using HarmonyLib;
 using Hex.Configs;
 using Hex.GameHub.Lobby.UI;
 using Hex.GameHub.UICommon;
+using Il2CppInterop.Runtime;
 using Il2CppCollections = Il2CppSystem.Collections.Generic;
 
 namespace TowerLegacy;
@@ -95,12 +95,13 @@ public static class ScFractionSelect_qwb_Patch
     }
 }
 
+// Safety net patches — cover any get_Name / get_name variant the game may use
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {
     public static void Postfix(FractionConfig __instance, ref string __result)
     {
-        try { if (TowerDbInjector.GetIdSafe(__instance) == "tower") __result = "Tower"; }
+        try { if (__instance?.id == "tower") __result = "Tower"; }
         catch { }
     }
 }
@@ -110,49 +111,8 @@ public static class FractionConfig_get_name_Patch
 {
     public static void Postfix(FractionConfig __instance, ref string __result)
     {
-        try { if (TowerDbInjector.GetIdSafe(__instance) == "tower") __result = "Tower"; }
+        try { if (__instance?.id == "tower") __result = "Tower"; }
         catch { }
-    }
-}
-
-[HarmonyPatch]
-public static class LocalizationTranslate_Patch
-{
-    static MethodBase TargetMethod()
-    {
-        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            foreach (var t in TrySafeGetTypes(asm))
-            {
-                if (!t.Name.ToLower().Contains("local") && !t.Name.ToLower().Contains("loc"))
-                    continue;
-
-                foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
-                                                BindingFlags.Static | BindingFlags.Instance))
-                {
-                    if (m.ReturnType != typeof(string)) continue;
-                    var prms = m.GetParameters();
-                    if (prms.Length == 1 && prms[0].ParameterType == typeof(string))
-                    {
-                        Plugin.Log.LogInfo($"[TowerInject] Loc patch targeting: {t.FullName}.{m.Name}");
-                        return m;
-                    }
-                }
-            }
-        }
-        Plugin.Log.LogWarning("[TowerInject] Could not find localization Translate method.");
-        return null;
-    }
-
-    static IEnumerable<Type> TrySafeGetTypes(Assembly asm)
-    {
-        try { return asm.GetTypes(); }
-        catch { return Enumerable.Empty<Type>(); }
-    }
-
-    public static void Postfix(string __0, ref string __result)
-    {
-        _ = __0;
     }
 }
 
@@ -168,11 +128,8 @@ internal static class TowerDbInjector
                 .FirstOrDefault(a => a.GetName().Name == "Hex");
             if (hexAsm == null) { Plugin.Log.LogWarning("[TowerInject] Hex assembly not found."); return; }
 
-            var fractionType = hexAsm.GetType("Hex.Configs.FractionConfig");
-            var cjvType      = hexAsm.GetType("cjv");
-
-            if (fractionType == null || cjvType == null)
-            { Plugin.Log.LogWarning("[TowerInject] Required types not found."); return; }
+            var cjvType = hexAsm.GetType("cjv");
+            if (cjvType == null) { Plugin.Log.LogWarning("[TowerInject] cjv type not found."); return; }
 
             var repo = GetStaticProperty(cjvType, "bxjy");
             if (repo == null) { Plugin.Log.LogWarning("[TowerInject] cjv.bxjy not found."); return; }
@@ -188,36 +145,50 @@ internal static class TowerDbInjector
             Plugin.Log.LogInfo($"[TowerInject] bxjw type = {listObj.GetType().FullName}");
             Plugin.Log.LogInfo($"[TowerInject] bxjx type = {dictObj.GetType().FullName}");
 
-            var existing = FindByIdInDict(dictObj, "tower") ?? FindByIdInList(listObj, "tower");
-            if (existing != null)
+            // Already injected
+            if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             {
                 Plugin.DbInjected = true;
                 Plugin.Log.LogInfo("[TowerInject] tower already exists in DB.");
                 return;
             }
 
-            var human = FindByIdInDict(dictObj, "human") ?? FindByIdInList(listObj, "human");
-            if (human == null)
-            {
-                Plugin.Log.LogWarning("[TowerInject] human config not found.");
-                DumpListIds(listObj);
-                return;
-            }
+            // Get typed human config via IL2CPP pointer cast
+            var humanRaw = FindByIdInList(listObj, "human");
+            if (humanRaw == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
 
-            // Dump every field on Human so we can see exactly which one holds the name
-            DumpAllFields(fractionType, human);
+            // Cast the raw object to the typed FractionConfig using IL2CPP interop
+            var human = humanRaw as FractionConfig
+                        ?? new FractionConfig(((Il2CppSystem.Object)humanRaw).Pointer);
 
-            Plugin.Log.LogInfo("[TowerInject] Cloning human into tower...");
+            Plugin.Log.LogInfo($"[TowerInject] human typed cast ok, name = {human.name}");
 
-            var tower = Activator.CreateInstance(fractionType);
-            if (tower == null) { Plugin.Log.LogWarning("[TowerInject] Could not create FractionConfig instance."); return; }
+            // Create a new FractionConfig native object and copy typed properties
+            var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
+                Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
 
-            CopyAllFields(fractionType, human, tower);
-            SetId(tower, "tower");
-            TryNullNameField(tower, fractionType);
+            Plugin.Log.LogInfo("[TowerInject] tower native object created");
 
-            AddToList(listObj, tower);
-            AddToDict(dictObj, "tower", tower);
+            // Copy all typed properties from human, then override id and name
+            tower.id              = "tower";
+            tower.name            = "Tower";
+            tower.desc            = human.desc;
+            tower.narrativeDesc   = human.narrativeDesc;
+            tower.color           = human.color;
+            tower.isEnabled       = human.isEnabled;
+
+            Plugin.Log.LogInfo($"[TowerInject] tower.id = {tower.id}, tower.name = {tower.name}");
+
+            // Add to both collections using typed IL2Cpp list/dict
+            var typedList = listObj as Il2CppCollections.List<FractionConfig>
+                            ?? new Il2CppCollections.List<FractionConfig>(
+                                ((Il2CppSystem.Object)listObj).Pointer);
+            var typedDict = dictObj as Il2CppCollections.Dictionary<string, FractionConfig>
+                            ?? new Il2CppCollections.Dictionary<string, FractionConfig>(
+                                ((Il2CppSystem.Object)dictObj).Pointer);
+
+            typedList.Add(tower);
+            typedDict.Add("tower", tower);
 
             Plugin.DbInjected = true;
             Plugin.Log.LogInfo("[TowerInject] tower injected into bxjw and bxjx.");
@@ -230,147 +201,8 @@ internal static class TowerDbInjector
 
     public static string GetIdSafe(object cfg)
     {
-        try { return GetId(cfg); }
+        try { return (cfg as FractionConfig)?.id; }
         catch { return null; }
-    }
-
-    // Dump every field name, type, and value on the human config.
-    // Run this once to find the field that holds "Temple" / "Human".
-    static void DumpAllFields(Type rootType, object obj)
-    {
-        Plugin.Log.LogInfo("[TowerInject] === FractionConfig field dump ===");
-        foreach (var t in GetTypeChain(rootType))
-        {
-            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                try
-                {
-                    var val = f.GetValue(obj);
-                    Plugin.Log.LogInfo($"[TowerInject] FIELD {f.Name} ({f.FieldType.Name}) = {val}");
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.LogInfo($"[TowerInject] FIELD {f.Name} ({f.FieldType.Name}) = <error: {ex.Message}>");
-                }
-            }
-        }
-        Plugin.Log.LogInfo("[TowerInject] === end field dump ===");
-    }
-
-    static void CopyAllFields(Type rootType, object src, object dst)
-    {
-        var skipNames = new HashSet<string>
-        {
-            "name", "Name", "_name",
-            "desc", "Desc", "_desc",
-            "narrativeDesc", "NarrativeDesc", "_narrativeDesc"
-        };
-
-        foreach (var t in GetTypeChain(rootType))
-        {
-            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                if (skipNames.Contains(f.Name)) continue;
-
-                var ft = f.FieldType;
-                if (ft.IsArray) continue;
-                if (typeof(ICollection).IsAssignableFrom(ft)) continue;
-                if (ft.IsGenericType)
-                {
-                    var gtd = ft.GetGenericTypeDefinition();
-                    if (gtd == typeof(List<>) || gtd == typeof(Dictionary<,>) ||
-                        gtd == typeof(HashSet<>) || gtd == typeof(Queue<>))
-                        continue;
-                }
-                var ftn = ft.FullName ?? "";
-                if (ftn.Contains("Il2CppSystem.Collections") || ftn.Contains("Il2CppInterop"))
-                    continue;
-
-                // Skip all non-primitive reference types except string
-                // to avoid IL2Cpp object graph issues
-                if (!ft.IsValueType && ft != typeof(string) && !ft.IsEnum)
-                    continue;
-
-                try { f.SetValue(dst, f.GetValue(src)); }
-                catch { }
-            }
-        }
-    }
-
-    static void TryNullNameField(object cfg, Type rootType)
-    {
-        foreach (var t in GetTypeChain(rootType))
-        {
-            foreach (var fname in new[] { "name", "Name", "_name" })
-            {
-                var f = t.GetField(fname, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (f == null) continue;
-
-                try
-                {
-                    if (f.FieldType == typeof(string))
-                    {
-                        f.SetValue(cfg, "Tower");
-                        Plugin.Log.LogInfo($"[TowerInject] Set string name field '{fname}' = Tower");
-                        return;
-                    }
-                    if (!f.FieldType.IsValueType)
-                    {
-                        f.SetValue(cfg, null);
-                        Plugin.Log.LogInfo($"[TowerInject] Nulled ref name field '{fname}'");
-                        return;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.LogWarning($"[TowerInject] TryNullNameField '{fname}' failed: {ex.Message}");
-                }
-            }
-        }
-        Plugin.Log.LogWarning("[TowerInject] TryNullNameField: no name field found on FractionConfig.");
-    }
-
-    static void SetId(object cfg, string newId)
-    {
-        foreach (var t in GetTypeChain(cfg.GetType()))
-        {
-            foreach (var name in new[] { "id", "Id", "sid", "_id" })
-            {
-                var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (f != null && f.FieldType == typeof(string))
-                {
-                    f.SetValue(cfg, newId);
-                    Plugin.Log.LogInfo($"[TowerInject] Set {t.FullName}.{name} = {newId}");
-                    return;
-                }
-                var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (p != null && p.CanWrite && p.PropertyType == typeof(string))
-                {
-                    p.SetValue(cfg, newId);
-                    Plugin.Log.LogInfo($"[TowerInject] Set {t.FullName}.{name} = {newId}");
-                    return;
-                }
-            }
-        }
-        Plugin.Log.LogWarning("[TowerInject] Could not find id field/property to set.");
-    }
-
-    static string GetId(object cfg)
-    {
-        foreach (var t in GetTypeChain(cfg.GetType()))
-        {
-            foreach (var name in new[] { "id", "Id", "sid", "_id" })
-            {
-                var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (f != null && f.FieldType == typeof(string))
-                    return f.GetValue(cfg) as string;
-
-                var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (p != null && p.CanRead && p.PropertyType == typeof(string))
-                    return p.GetValue(cfg) as string;
-            }
-        }
-        return null;
     }
 
     static object GetStaticProperty(Type t, string name)
@@ -396,60 +228,53 @@ internal static class TowerDbInjector
 
     static object FindByIdInList(object listObj, string wantedId)
     {
-        var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
-        var itemProp = listObj.GetType().GetProperty("Item");
-        for (int i = 0; i < count; i++)
+        // Use typed list directly if possible
+        try
         {
-            var item = itemProp.GetValue(listObj, new object[] { i });
-            if (item == null) continue;
-            if (GetId(item) == wantedId) return item;
+            var typedList = listObj as Il2CppCollections.List<FractionConfig>
+                            ?? new Il2CppCollections.List<FractionConfig>(
+                                ((Il2CppSystem.Object)listObj).Pointer);
+            for (int i = 0; i < typedList.Count; i++)
+            {
+                var item = typedList[i];
+                if (item != null && item.id == wantedId) return item;
+            }
+            return null;
         }
-        return null;
+        catch
+        {
+            // fallback to reflection-based id scan
+            var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
+            var itemProp = listObj.GetType().GetProperty("Item");
+            for (int i = 0; i < count; i++)
+            {
+                var item = itemProp.GetValue(listObj, new object[] { i });
+                if (item == null) continue;
+                var fc = item as FractionConfig;
+                if (fc != null && fc.id == wantedId) return item;
+            }
+            return null;
+        }
     }
 
     static object FindByIdInDict(object dictObj, string wantedId)
     {
-        var containsKey = dictObj.GetType().GetMethod("ContainsKey");
-        var itemProp    = dictObj.GetType().GetProperty("Item");
-        if (containsKey != null && (bool)containsKey.Invoke(dictObj, new object[] { wantedId }))
-            return itemProp.GetValue(dictObj, new object[] { wantedId });
-        return null;
-    }
-
-    static void AddToList(object listObj, object item)
-    {
-        listObj.GetType().GetMethod("Add").Invoke(listObj, new[] { item });
-        Plugin.Log.LogInfo("[TowerInject] Added tower to bxjw list.");
-    }
-
-    static void AddToDict(object dictObj, string key, object value)
-    {
-        dictObj.GetType().GetMethod("Add").Invoke(dictObj, new object[] { key, value });
-        Plugin.Log.LogInfo($"[TowerInject] Added {key} to bxjx dictionary.");
-    }
-
-    static IEnumerable<Type> GetTypeChain(Type t)
-    {
-        while (t != null) { yield return t; t = t.BaseType; }
-    }
-
-    static void DumpListIds(object listObj)
-    {
         try
         {
-            var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
-            var itemProp = listObj.GetType().GetProperty("Item");
-            Plugin.Log.LogInfo($"[TowerInject] bxjw count = {count}");
-            for (int i = 0; i < count && i < 30; i++)
-            {
-                var item = itemProp.GetValue(listObj, new object[] { i });
-                if (item == null) continue;
-                Plugin.Log.LogInfo($"[TowerInject] bxjw[{i}] id = {GetId(item)}");
-            }
+            var typedDict = dictObj as Il2CppCollections.Dictionary<string, FractionConfig>
+                            ?? new Il2CppCollections.Dictionary<string, FractionConfig>(
+                                ((Il2CppSystem.Object)dictObj).Pointer);
+            if (typedDict.ContainsKey(wantedId))
+                return typedDict[wantedId];
+            return null;
         }
-        catch (Exception ex)
+        catch
         {
-            Plugin.Log.LogWarning($"[TowerInject] DumpListIds failed: {ex.Message}");
+            var containsKey = dictObj.GetType().GetMethod("ContainsKey");
+            var itemProp    = dictObj.GetType().GetProperty("Item");
+            if (containsKey != null && (bool)containsKey.Invoke(dictObj, new object[] { wantedId }))
+                return itemProp.GetValue(dictObj, new object[] { wantedId });
+            return null;
         }
     }
 }

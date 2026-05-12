@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
@@ -11,7 +12,6 @@ using Hex.Configs;
 using Hex.GameHub.Lobby.UI;
 using Hex.GameHub.UICommon;
 using Il2CppInterop.Runtime;
-using Newtonsoft.Json;
 using Il2CppCollections = Il2CppSystem.Collections.Generic;
 
 namespace TowerLegacy;
@@ -25,7 +25,7 @@ public class TowerFractionJson
 public class TowerFractionData
 {
     public string id            { get; set; }
-    public string name          { get; set; }   // loc key, e.g. "tower_name"
+    public string name          { get; set; }
     public string desc          { get; set; }
     public string narrativeDesc { get; set; }
 }
@@ -68,7 +68,7 @@ public static class ScFractionSelect_qwb_Patch
             if (__result == null || __result.Count == 0) return;
 
             for (int i = 0; i < __result.Count; i++)
-                if (__result[i]?.sid == "tower") return;   // already there
+                if (__result[i]?.sid == "tower") return;
 
             FractionLobbyAsset src = null;
             for (int i = 0; i < __result.Count; i++)
@@ -94,7 +94,7 @@ public static class ScFractionSelect_qwb_Patch
     }
 }
 
-// Safety-net: override any localized name lookup for the tower config
+// Safety-net name overrides
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {
@@ -118,7 +118,6 @@ public static class FractionConfig_get_name_Patch
 // ── DB INJECTOR ───────────────────────────────────────────────────────────────
 internal static class TowerDbInjector
 {
-    // Resolved path: <BepInEx>/plugins/TowerLegacy/DB/fractions/tower.json
     static string JsonPath =>
         Path.Combine(
             Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!,
@@ -130,7 +129,7 @@ internal static class TowerDbInjector
         {
             Plugin.Log.LogInfo("[TowerInject] Direct DB injection starting...");
 
-            // ── 1. Load JSON ──────────────────────────────────────────────
+            // 1. Load JSON
             if (!File.Exists(JsonPath))
             {
                 Plugin.Log.LogWarning($"[TowerInject] JSON not found: {JsonPath}");
@@ -138,16 +137,17 @@ internal static class TowerDbInjector
             }
 
             var jsonText = File.ReadAllText(JsonPath);
-            var jsonData = JsonConvert.DeserializeObject<TowerFractionJson>(jsonText);
+            var options  = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var jsonData = JsonSerializer.Deserialize<TowerFractionJson>(jsonText, options);
             var data     = jsonData?.array?.FirstOrDefault(x => x.id == "tower");
             if (data == null) { Plugin.Log.LogWarning("[TowerInject] tower entry missing from JSON."); return; }
 
             Plugin.Log.LogInfo($"[TowerInject] JSON loaded: id={data.id} name={data.name}");
 
-            // ── 2. Inject localization entry ──────────────────────────────
+            // 2. Inject localization entry
             TryInjectLocKey(data.name, "Tower City");
 
-            // ── 3. Find DB collections ────────────────────────────────────
+            // 3. Find DB collections
             var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
                 .FirstOrDefault(a => a.GetName().Name == "Hex");
             if (hexAsm == null) { Plugin.Log.LogWarning("[TowerInject] Hex assembly not found."); return; }
@@ -169,7 +169,7 @@ internal static class TowerDbInjector
             if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
 
-            // ── 4. Clone human as base, override with JSON values ─────────
+            // 4. Get human config as base
             var humanRaw = FindByIdInList(listObj, "human");
             if (humanRaw == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
 
@@ -182,13 +182,13 @@ internal static class TowerDbInjector
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
 
             tower.id            = data.id;
-            tower.name          = data.name;          // "tower_name" loc key
+            tower.name          = data.name;
             tower.desc          = data.desc;
             tower.narrativeDesc = data.narrativeDesc;
 
             Plugin.Log.LogInfo($"[TowerInject] tower.id={tower.id} tower.name={tower.name}");
 
-            // ── 5. Add to collections ─────────────────────────────────────
+            // 5. Add to collections
             var typedList = listObj as Il2CppCollections.List<FractionConfig>
                             ?? new Il2CppCollections.List<FractionConfig>(
                                 ((Il2CppSystem.Object)listObj).Pointer);
@@ -208,9 +208,6 @@ internal static class TowerDbInjector
         }
     }
 
-    // Inject a localization key->value pair into the game's active LocKit table.
-    // Finds the first Dictionary<string,string>-like table that already contains
-    // known faction keys (e.g. "human_name") and adds our key there.
     static void TryInjectLocKey(string key, string value)
     {
         try
@@ -224,12 +221,8 @@ internal static class TowerDbInjector
                 foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
                 {
                     if (!typeof(System.Collections.IDictionary).IsAssignableFrom(field.FieldType)) continue;
-
                     var dict = field.GetValue(null) as System.Collections.IDictionary;
-                    if (dict == null) continue;
-
-                    // Check if this looks like a loc table by probing for a known key
-                    if (!dict.Contains("human_name")) continue;
+                    if (dict == null || !dict.Contains("human_name")) continue;
 
                     if (!dict.Contains(key))
                     {
@@ -237,19 +230,14 @@ internal static class TowerDbInjector
                         Plugin.Log.LogInfo($"[TowerInject] Injected loc key '{key}' = '{value}' into {type.FullName}.{field.Name}");
                     }
                     else
-                    {
                         Plugin.Log.LogInfo($"[TowerInject] Loc key '{key}' already present.");
-                    }
                     return;
                 }
             }
 
-            Plugin.Log.LogWarning($"[TowerInject] Could not find loc table to inject '{key}'.");
+            Plugin.Log.LogWarning($"[TowerInject] Could not find loc table for '{key}'.");
         }
-        catch (Exception ex)
-        {
-            Plugin.Log.LogWarning($"[TowerInject] TryInjectLocKey failed: {ex.Message}");
-        }
+        catch (Exception ex) { Plugin.Log.LogWarning($"[TowerInject] TryInjectLocKey failed: {ex.Message}"); }
     }
 
     public static string GetIdSafe(object cfg)

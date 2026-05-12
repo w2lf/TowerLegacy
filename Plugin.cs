@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
@@ -73,6 +74,22 @@ public class Plugin : BasePlugin
         catch { }
     }
 
+    // ── Safe native string read (avoids Il2CppStringToManaged crash) ─────────
+    // IL2CPP strings: [object header (16)] [length (int32)] [chars (UTF-16)]
+    static string SafeReadNativeString(IntPtr ptr)
+    {
+        try
+        {
+            if (ptr == IntPtr.Zero) return null;
+            // Read length field at offset 16 (object header size on 64-bit IL2CPP)
+            int len = Marshal.ReadInt32(ptr, 16);
+            if (len <= 0 || len > 2048) return null;  // sanity bounds
+            // Chars start at offset 20
+            return Marshal.PtrToStringUni(ptr + 20, len);
+        }
+        catch { return null; }
+    }
+
     // ── Localization patch ────────────────────────────────────────────────────
     internal static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
     {
@@ -88,6 +105,13 @@ public class Plugin : BasePlugin
         "GetKey", "GetEntry",
     };
 
+    // Type name fragments that indicate a localization-related class
+    static readonly string[] LocTypeKeywords = new[]
+    {
+        "loc", "local", "lang", "text", "string", "i18n", "trans", "dict",
+        "Loc", "Local", "Lang", "Text", "String", "I18n", "Trans", "Dict",
+    };
+
     static void PatchLocalization()
     {
         try
@@ -101,6 +125,11 @@ public class Plugin : BasePlugin
 
             foreach (var type in hexAsm.GetTypes())
             {
+                // Only scan types whose name suggests localization responsibility
+                bool isLocType = LocTypeKeywords.Any(k =>
+                    type.Name.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    (type.FullName != null && type.FullName.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0));
+
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                    BindingFlags.Instance | BindingFlags.Static))
                 {
@@ -109,14 +138,13 @@ public class Plugin : BasePlugin
                         if (m.ReturnType != typeof(string)) continue;
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
+                        if (m.IsAbstract) continue;
 
-                        // Named loc methods OR short obfuscated names (≤6 chars)
-                        bool isNamed = LocMethodNames.Contains(m.Name);
-                        bool isObfuscated = m.Name.Length <= 6;
-                        if (!isNamed && !isObfuscated) continue;
+                        // Must either be a known-named loc method, or be in a loc-type
+                        if (!LocMethodNames.Contains(m.Name) && !isLocType) continue;
 
                         Harmony.Patch(m, prefix: prefix);
-                        Log.LogInfo($"[LocPatch] Patched {type.FullName}.{m.Name}");
+                        Log.LogDebug($"[LocPatch] Patched {type.FullName}.{m.Name}");
                         patched++;
                     }
                     catch { }
@@ -129,19 +157,15 @@ public class Plugin : BasePlugin
     }
 
     /// <summary>
-    /// Prefix using raw IntPtr to avoid Il2CppStringToManagedIntPtr trampoline crash.
-    /// Accepting `string __0` forces Il2CppInterop to marshal EVERY incoming native
-    /// string pointer — including null/invalid ones — causing "Length cannot be less
-    /// than zero". Instead we take the raw pointer and only marshal when non-zero
-    /// and only when it matches one of our keys.
+    /// Reads the native IL2CPP string directly via Marshal to bypass the
+    /// Il2CppStringToManaged trampoline, which crashes on null/invalid ptrs.
     /// </summary>
     public static bool LocPrefix(IntPtr __0, ref string __result)
     {
         try
         {
             if (__0 == IntPtr.Zero) return true;
-            // Marshal the native string pointer safely
-            var key = IL2CPP.Il2CppStringToManaged(__0);
+            var key = SafeReadNativeString(__0);
             if (key != null && LocOverrides.TryGetValue(key, out var val))
             {
                 Log.LogInfo($"[LocPatch] Intercepted key '{key}' → '{val}'");

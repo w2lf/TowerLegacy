@@ -31,7 +31,6 @@ public class Plugin : BasePlugin
 
     internal static readonly HashSet<IntPtr> TowerSlotPtrs = new HashSet<IntPtr>();
 
-    // Il2Cpp object-pool internals — must never be copied between instances
     public static readonly HashSet<string> SkipFields = new HashSet<string>(StringComparer.Ordinal)
         { "pooledPtr", "isWrapped" };
 
@@ -48,7 +47,6 @@ public class Plugin : BasePlugin
         Log.LogInfo("TowerLegacy loaded.");
     }
 
-    // ── Diagnostic: dump FractionLobbyAsset fields so we know the real sid field name ──
     static void DumpFractionLobbyAssetFields()
     {
         try
@@ -69,7 +67,6 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[Dump] {ex.Message}"); }
     }
 
-    // ── Diagnostic: dump all (string)->string methods in Hex so we know real loc method names ──
     static void DumpLocMethods()
     {
         try
@@ -102,7 +99,6 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[LocDump] {ex.Message}"); }
     }
 
-    // ── Localization patch ────────────────────────────────────────────────────────────────────────
     internal static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
     {
         { "tower_name",   "Tower City" },
@@ -110,6 +106,9 @@ public class Plugin : BasePlugin
         { "tower_select", "Select Tower City" },
     };
 
+    // Only patch methods inside types whose name contains "loc" or "lang" (case-insensitive).
+    // This prevents the scatter-patch that was hitting thousands of unrelated (string)->string
+    // methods and causing Il2CppStringToManagedIntPtr crashes on null returns.
     static void PatchLocalization()
     {
         try
@@ -123,7 +122,11 @@ public class Plugin : BasePlugin
 
             foreach (var type in hexAsm.GetTypes())
             {
-                if (type.Name.Length == 0 || !char.IsLower(type.Name[0])) continue;
+                // Only consider types whose name hints at localization
+                var tname = type.Name.ToLowerInvariant();
+                bool isLocType = tname.Contains("loc") || tname.Contains("lang")
+                              || tname.Contains("local") || tname.Contains("translate");
+                if (!isLocType) continue;
 
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                    BindingFlags.Instance | BindingFlags.Static))
@@ -144,11 +147,20 @@ public class Plugin : BasePlugin
                 }
             }
 
+            if (patched == 0)
+            {
+                // Fallback: no loc-named types found — log a warning so we can see
+                // which types DO exist and pick the right one from LocDump output.
+                Log.LogWarning("[LocPatch] No loc-named types found — check [LocDump] lines above for the real type name.");
+            }
+
             Log.LogInfo($"[LocPatch] Patched {patched} loc method(s) in Hex.");
         }
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
+    // Prefix: intercept before the native call so Il2CppInterop never tries to
+    // marshal a null/invalid IntPtr for keys we override.
     public static bool LocPrefix(string __0, ref string __result)
     {
         try
@@ -157,11 +169,11 @@ public class Plugin : BasePlugin
             {
                 Log.LogInfo($"[LocPatch] Intercepted '{__0}' -> '{val}'");
                 __result = val;
-                return false;
+                return false; // skip original
             }
         }
         catch { }
-        return true;
+        return true; // let original run
     }
 }
 
@@ -224,7 +236,6 @@ public static class ScFractionSelect_qwa_Patch
     {
         var slot = new FractionLobbyAsset();
 
-        // Copy fields — skip Il2Cpp object-pool internals to prevent double-free crash
         foreach (var f in typeof(FractionLobbyAsset).GetFields(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
@@ -232,7 +243,6 @@ public static class ScFractionSelect_qwa_Patch
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         }
 
-        // Copy writable properties (Sprite fields etc.) — skip pool-internal props
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
@@ -241,7 +251,6 @@ public static class ScFractionSelect_qwa_Patch
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
         }
 
-        // Override sid -> "tower"
         bool sidSet = false;
         foreach (var f in typeof(FractionLobbyAsset).GetFields(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
@@ -260,7 +269,6 @@ public static class ScFractionSelect_qwa_Patch
             catch { }
         }
 
-        // Try sid property if field override didn't work
         if (!sidSet)
         {
             try { slot.sid = "tower"; sidSet = true; Plugin.Log.LogInfo("[TowerInject] Set sid property -> 'tower'"); }

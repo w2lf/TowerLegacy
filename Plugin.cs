@@ -35,7 +35,47 @@ public class Plugin : BasePlugin
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
+        PatchSoFractionsLookups();
         Log.LogInfo("TowerLegacy loaded.");
+    }
+
+    // Patch every method on SoFractions that takes a string as first param.
+    // If the string is "tower", redirect to "human" so array lookups don't return null.
+    void PatchSoFractionsLookups()
+    {
+        try
+        {
+            var methods = typeof(SoFractions)
+                .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static)
+                .Where(m => m.GetParameters().Length >= 1
+                         && m.GetParameters()[0].ParameterType == typeof(string))
+                .ToList();
+
+            Log.LogInfo($"[TowerInject] SoFractions string-param methods: {methods.Count}");
+            foreach (var m in methods)
+                Log.LogInfo($"[TowerInject]   {m.ReturnType.Name} {m.Name}({string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name))})");
+
+            foreach (var method in methods)
+            {
+                try
+                {
+                    Harmony.Patch(method,
+                        prefix: new HarmonyMethod(typeof(SoFractions_Redirect_Patch), nameof(SoFractions_Redirect_Patch.Prefix)));
+                    Log.LogInfo($"[TowerInject] Patched SoFractions.{method.Name}");
+                }
+                catch (Exception ex) { Log.LogWarning($"[TowerInject] SoFractions patch failed {method.Name}: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex) { Log.LogError($"[TowerInject] PatchSoFractionsLookups failed: {ex}"); }
+    }
+}
+
+// Redirect any SoFractions lookup for "tower" → "human" until tower has real data.
+public static class SoFractions_Redirect_Patch
+{
+    public static void Prefix(ref string __0)
+    {
+        if (__0 == "tower") __0 = "human";
     }
 }
 
@@ -101,7 +141,6 @@ public static class ScFractionSelect_qwa_Patch
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
 
-    // Full reflection clone of src, only sid overridden.
     internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src)
     {
         var slot = new FractionLobbyAsset();
@@ -125,11 +164,9 @@ public static class ScFractionSelect_qwb_Patch
         {
             if (__result == null || __result.Count == 0) return;
 
-            // Content check first.
             for (int i = 0; i < __result.Count; i++)
                 if (__result[i]?.sid == "tower") return;
 
-            // Pointer check second.
             var listPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(__result);
             if (_injected.Contains(listPtr)) return;
             _injected.Add(listPtr);
@@ -177,7 +214,6 @@ internal static class TowerDbInjector
             if (humanCfg == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
             Plugin.Log.LogInfo($"[TowerInject] human ok, id={humanCfg.id}");
 
-            // Full reflection clone of human — keep name/desc/everything identical for now.
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
             foreach (var f in typeof(FractionConfig).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
@@ -185,7 +221,7 @@ internal static class TowerDbInjector
             foreach (var p in typeof(FractionConfig).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 try { if (p.CanRead && p.CanWrite) p.SetValue(tower, p.GetValue(humanCfg)); } catch { }
 
-            tower.id = "tower"; // only change id; name stays as human's valid loc key
+            tower.id = "tower";
             Plugin.Log.LogInfo($"[TowerInject] tower cloned, id={tower.id}");
 
             var typedList = listObj as Il2CppCollections.List<FractionConfig>

@@ -1,3 +1,10 @@
+// Workaround: IL2CPP net6 BepInEx target is missing NullableAttribute compiler support.
+namespace System.Runtime.CompilerServices
+{
+    internal sealed class NullableAttribute : Attribute { public NullableAttribute(byte _) { } public NullableAttribute(byte[] _) { } }
+    internal sealed class NullableContextAttribute : Attribute { public NullableContextAttribute(byte _) { } }
+}
+
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -42,11 +49,10 @@ public class Plugin : BasePlugin
 
     internal const string TowerDisplayName = "Tower";
 
-    // Loc key overrides: key → display string
-    internal static readonly Dictionary<string, string> LocOverrides = new(StringComparer.OrdinalIgnoreCase)
+    internal static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["tower_name"] = TowerDisplayName,
-        ["tower_desc"] = "A mighty tower faction.",
+        { "tower_name", TowerDisplayName },
+        { "tower_desc", "A mighty tower faction." },
     };
 
     public override void Load()
@@ -58,7 +64,6 @@ public class Plugin : BasePlugin
         Log.LogInfo("TowerLegacy loaded.");
     }
 
-    // Patch LocKit at runtime via reflection since we don’t have a compile-time type reference.
     void PatchLocKit()
     {
         try
@@ -69,8 +74,8 @@ public class Plugin : BasePlugin
 
             if (locKitType == null) { Log.LogWarning("[TowerInject] LocKit type not found."); return; }
 
-            // Find the string→string getter (most likely: string Get(string key) or similar)
-            var candidates = locKitType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)
+            var candidates = locKitType
+                .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)
                 .Where(m => m.ReturnType == typeof(string)
                          && m.GetParameters().Length >= 1
                          && m.GetParameters()[0].ParameterType == typeof(string))
@@ -80,7 +85,6 @@ public class Plugin : BasePlugin
             foreach (var c in candidates)
                 Log.LogInfo($"[TowerInject]   LocKit method: {c.Name}({string.Join(", ", c.GetParameters().Select(p => p.ParameterType.Name))})");
 
-            // Patch all candidates — our prefix returns false (skip original) only when key is known.
             foreach (var method in candidates)
             {
                 try
@@ -96,7 +100,6 @@ public class Plugin : BasePlugin
     }
 }
 
-// Intercepts any LocKit string getter where first param is our key.
 public static class LocKit_Get_Patch
 {
     public static bool Prefix(object[] __args, ref string __result)
@@ -108,7 +111,7 @@ public static class LocKit_Get_Patch
             if (key != null && Plugin.LocOverrides.TryGetValue(key, out var val))
             {
                 __result = val;
-                return false; // skip original
+                return false;
             }
         }
         catch { }
@@ -192,11 +195,10 @@ public static class ScFractionSelect_qwa_Patch
     };
 }
 
-// qwb builds the list qwa iterates. Dedup by content first, then cache pointer.
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {
-    static readonly HashSet<IntPtr> _injected = new();
+    static readonly HashSet<IntPtr> _injected = new HashSet<IntPtr>();
 
     public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
     {
@@ -204,7 +206,6 @@ public static class ScFractionSelect_qwb_Patch
         {
             if (__result == null || __result.Count == 0) return;
 
-            // Content check first — handles pointer reuse and fresh lists alike.
             for (int i = 0; i < __result.Count; i++)
                 if (__result[i]?.sid == "tower") return;
 

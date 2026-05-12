@@ -62,11 +62,10 @@ public static class ScLobby2_Init_Patch
     }
 }
 
+// Runs BEFORE qwa spawns UI slots — injects tower into SoFractions.fractions + dict_
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwa))]
 public static class ScFractionSelect_qwa_Patch
 {
-    static bool _dumped = false;
-
     public static void Prefix(ScFractionSelect __instance)
     {
         try
@@ -80,13 +79,13 @@ public static class ScFractionSelect_qwa_Patch
             // ─ fractions array ───────────────────────────────────────────
             var arrFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "fractions");
             var arrObjPtr   = IL2CPP.il2cpp_field_get_value_object(arrFieldPtr, objPtr);
-
             if (arrObjPtr == IntPtr.Zero) { Plugin.Log.LogWarning("[TowerInject] fractions ptr zero."); return; }
 
             var arr = new Il2CppReferenceArray<FractionLobbyAsset>(arrObjPtr);
 
+            // Already injected — don't double-add
             for (int i = 0; i < arr.Length; i++)
-                if (arr[i]?.sid == "tower") return; // already injected
+                if (arr[i]?.sid == "tower") return;
 
             FractionLobbyAsset src = null;
             for (int i = 0; i < arr.Length; i++)
@@ -118,7 +117,6 @@ public static class ScFractionSelect_qwa_Patch
             // ─ dict_ ───────────────────────────────────────────────────
             var dictFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "dict_");
             var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
-
             if (dictObjPtr != IntPtr.Zero)
             {
                 var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
@@ -131,87 +129,12 @@ public static class ScFractionSelect_qwa_Patch
             else Plugin.Log.LogWarning("[TowerInject] dict_ is null, skipping.");
 
             Plugin.Log.LogInfo("[TowerInject] Injected tower into SoFractions before qwa.");
-
-            // ─ dump FractionLobbyAsset fields (once) ─────────────────────
-            if (!_dumped)
-            {
-                _dumped = true;
-                DumpAssetFields("human", src);
-                DumpAssetFields("tower", slot);
-            }
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
-
-    static void DumpAssetFields(string label, FractionLobbyAsset asset)
-    {
-        try
-        {
-            var classPtr = Il2CppClassPointerStore<FractionLobbyAsset>.NativeClassPtr;
-            var objPtr   = IL2CPP.Il2CppObjectBaseToPtrNotNull(asset);
-
-            Plugin.Log.LogInfo($"[TowerInject] === FractionLobbyAsset fields ({label}) ===");
-
-            IntPtr iter = IntPtr.Zero;
-            IntPtr fieldPtr;
-            while ((fieldPtr = IL2CPP.il2cpp_class_get_fields(classPtr, ref iter)) != IntPtr.Zero)
-            {
-                try
-                {
-                    string fieldName = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_field_get_name(fieldPtr));
-                    IntPtr typePtr   = IL2CPP.il2cpp_field_get_type(fieldPtr);
-                    string typeName  = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_type_get_name(typePtr));
-                    var    valPtr    = IL2CPP.il2cpp_field_get_value_object(fieldPtr, objPtr);
-
-                    Plugin.Log.LogInfo($"[TowerInject]   [{label}] '{fieldName}' ({typeName}) = {(valPtr == IntPtr.Zero ? "NULL" : valPtr.ToString())}");
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.LogInfo($"[TowerInject]   [{label}] field ERROR: {ex.Message}");
-                }
-            }
-
-            Plugin.Log.LogInfo($"[TowerInject] === end {label} ===");
-        }
-        catch (Exception ex)
-        {
-            Plugin.Log.LogError($"[TowerInject] DumpAssetFields({label}) failed: {ex}");
-        }
-    }
 }
 
-[HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
-public static class ScFractionSelect_qwb_Patch
-{
-    public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
-    {
-        try
-        {
-            if (__result == null || __result.Count == 0) return;
-            for (int i = 0; i < __result.Count; i++)
-                if (__result[i]?.sid == "tower") return;
-
-            FractionLobbyAsset src = null;
-            for (int i = 0; i < __result.Count; i++)
-                if (__result[i]?.sid == "human") { src = __result[i]; break; }
-            if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb fallback)."); return; }
-
-            __result.Add(new FractionLobbyAsset
-            {
-                sid          = "tower",
-                icon         = src.icon,
-                slotFon      = src.slotFon,
-                statisticFon = src.statisticFon,
-                versusFon    = src.versusFon,
-                bigIcon      = src.bigIcon,
-                card         = src.card
-            });
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb fallback.");
-        }
-        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb fallback failed: {ex}"); }
-    }
-}
-
+// Name patches — intercept whatever string getter the UI uses for faction name
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {
@@ -289,7 +212,7 @@ internal static class TowerDbInjector
             CopyAllFields(human, tower);
 
             tower.id            = data.id;
-            tower.name          = "";
+            tower.name          = data.name ?? Plugin.TowerDisplayName;
             tower.desc          = data.desc;
             tower.narrativeDesc = data.narrativeDesc;
 

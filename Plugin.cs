@@ -16,7 +16,6 @@ public class Plugin : BasePlugin
 {
     internal static new ManualLogSource Log;
     internal static Harmony Harmony;
-    internal static bool UiInjected;
     internal static bool DbInjected;
 
     public override void Load()
@@ -84,13 +83,13 @@ public static class ScFractionSelect_qwb_Patch
 
             // New UI entry — only share visual asset refs, not config data
             var slot = new FractionLobbyAsset();
-            slot.sid      = "tower";
-            slot.icon      = src.icon;
-            slot.slotFon   = src.slotFon;
+            slot.sid          = "tower";
+            slot.icon         = src.icon;
+            slot.slotFon      = src.slotFon;
             slot.statisticFon = src.statisticFon;
-            slot.versusFon = src.versusFon;
-            slot.bigIcon   = src.bigIcon;
-            slot.card      = src.card;
+            slot.versusFon    = src.versusFon;
+            slot.bigIcon      = src.bigIcon;
+            slot.card         = src.card;
 
             __result.Add(slot);
             Plugin.Log.LogInfo("[TowerInject] Injected UI slot: tower");
@@ -179,7 +178,6 @@ internal static class TowerDbInjector
         }
     }
 
-    // Helper: static property like cjv.bxjy
     static object GetStaticProperty(Type t, string name)
     {
         var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
@@ -193,7 +191,6 @@ internal static class TowerDbInjector
         return null;
     }
 
-    // Helper: instance field/property/getter like repo.bxni
     static object GetMember(object obj, string name)
     {
         var t = obj.GetType();
@@ -213,7 +210,6 @@ internal static class TowerDbInjector
         return null;
     }
 
-    // Walk IL2CPP list and find entry whose id/sid field matches
     static object FindByIdInList(object listObj, string wantedId)
     {
         var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
@@ -231,7 +227,6 @@ internal static class TowerDbInjector
         return null;
     }
 
-    // Look up a key in the IL2CPP dictionary
     static object FindByIdInDict(object dictObj, string wantedId)
     {
         var containsKey = dictObj.GetType().GetMethod("ContainsKey");
@@ -243,14 +238,12 @@ internal static class TowerDbInjector
         return null;
     }
 
-    // Add entry to IL2CPP dictionary
     static void AddToDict(object dictObj, string key, object value)
     {
         dictObj.GetType().GetMethod("Add").Invoke(dictObj, new object[] { key, value });
         Plugin.Log.LogInfo($"[TowerInject] Added {key} to bxjx dictionary.");
     }
 
-    // Read the id/sid field from any config object
     static string GetId(object cfg)
     {
         foreach (var t in GetTypeChain(cfg.GetType()))
@@ -270,7 +263,6 @@ internal static class TowerDbInjector
         return null;
     }
 
-    // Walk up inheritance chain
     static System.Collections.Generic.IEnumerable<Type> GetTypeChain(Type t)
     {
         while (t != null)
@@ -280,7 +272,6 @@ internal static class TowerDbInjector
         }
     }
 
-    // Debug: dump first 30 IDs from bxjw when tower is missing
     static void DumpListIds(object listObj)
     {
         try

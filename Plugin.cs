@@ -65,6 +65,8 @@ public static class ScLobby2_Init_Patch
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwa))]
 public static class ScFractionSelect_qwa_Patch
 {
+    static bool _dumped = false;
+
     public static void Prefix(ScFractionSelect __instance)
     {
         try
@@ -72,11 +74,11 @@ public static class ScFractionSelect_qwa_Patch
             var assets = __instance?.fractionsAssets;
             if (assets == null) { Plugin.Log.LogWarning("[TowerInject] fractionsAssets null."); return; }
 
-            var classPtr  = Il2CppClassPointerStore<SoFractions>.NativeClassPtr;
-            var objPtr    = IL2CPP.Il2CppObjectBaseToPtrNotNull(assets);
+            var soClassPtr = Il2CppClassPointerStore<SoFractions>.NativeClassPtr;
+            var objPtr     = IL2CPP.Il2CppObjectBaseToPtrNotNull(assets);
 
             // ─ fractions array ───────────────────────────────────────────
-            var arrFieldPtr = IL2CPP.GetIl2CppField(classPtr, "fractions");
+            var arrFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "fractions");
             var arrObjPtr   = IL2CPP.il2cpp_field_get_value_object(arrFieldPtr, objPtr);
 
             if (arrObjPtr == IntPtr.Zero) { Plugin.Log.LogWarning("[TowerInject] fractions ptr zero."); return; }
@@ -114,7 +116,7 @@ public static class ScFractionSelect_qwa_Patch
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
             // ─ dict_ ───────────────────────────────────────────────────
-            var dictFieldPtr = IL2CPP.GetIl2CppField(classPtr, "dict_");
+            var dictFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "dict_");
             var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
 
             if (dictObjPtr != IntPtr.Zero)
@@ -129,8 +131,52 @@ public static class ScFractionSelect_qwa_Patch
             else Plugin.Log.LogWarning("[TowerInject] dict_ is null, skipping.");
 
             Plugin.Log.LogInfo("[TowerInject] Injected tower into SoFractions before qwa.");
+
+            // ─ dump FractionLobbyAsset fields (once) ─────────────────────
+            if (!_dumped)
+            {
+                _dumped = true;
+                DumpAssetFields("human", src);
+                DumpAssetFields("tower", slot);
+            }
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
+    }
+
+    static void DumpAssetFields(string label, FractionLobbyAsset asset)
+    {
+        try
+        {
+            var classPtr = Il2CppClassPointerStore<FractionLobbyAsset>.NativeClassPtr;
+            var objPtr   = IL2CPP.Il2CppObjectBaseToPtrNotNull(asset);
+
+            Plugin.Log.LogInfo($"[TowerInject] === FractionLobbyAsset fields ({label}) ===");
+
+            IntPtr iter = IntPtr.Zero;
+            IntPtr fieldPtr;
+            while ((fieldPtr = IL2CPP.il2cpp_class_get_fields(classPtr, ref iter)) != IntPtr.Zero)
+            {
+                try
+                {
+                    string fieldName = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_field_get_name(fieldPtr));
+                    IntPtr typePtr   = IL2CPP.il2cpp_field_get_type(fieldPtr);
+                    string typeName  = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_type_get_name(typePtr));
+                    var    valPtr    = IL2CPP.il2cpp_field_get_value_object(fieldPtr, objPtr);
+
+                    Plugin.Log.LogInfo($"[TowerInject]   [{label}] '{fieldName}' ({typeName}) = {(valPtr == IntPtr.Zero ? "NULL" : valPtr.ToString())}");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogInfo($"[TowerInject]   [{label}] field ERROR: {ex.Message}");
+                }
+            }
+
+            Plugin.Log.LogInfo($"[TowerInject] === end {label} ===");
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.LogError($"[TowerInject] DumpAssetFields({label}) failed: {ex}");
+        }
     }
 }
 

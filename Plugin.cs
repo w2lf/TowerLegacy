@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using BepInEx;
 using BepInEx.Logging;
@@ -74,16 +75,15 @@ public static class ScFractionSelect_qwa_Patch
             var classPtr = Il2CppClassPointerStore<SoFractions>.NativeClassPtr;
             Plugin.Log.LogInfo($"[TowerInject] SoFractions classPtr: {classPtr}");
 
-            // Walk all native fields via il2cpp_class_get_fields
             IntPtr iter = IntPtr.Zero;
             IntPtr fieldPtr;
             while ((fieldPtr = IL2CPP.il2cpp_class_get_fields(classPtr, ref iter)) != IntPtr.Zero)
             {
                 try
                 {
-                    string fieldName = IL2CPP.il2cpp_field_get_name(fieldPtr);
-                    var    fieldType = IL2CPP.il2cpp_field_get_type(fieldPtr);
-                    string typeName  = IL2CPP.il2cpp_type_get_name(fieldType);
+                    string fieldName = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_field_get_name(fieldPtr));
+                    IntPtr typePtr   = IL2CPP.il2cpp_field_get_type(fieldPtr);
+                    string typeName  = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_type_get_name(typePtr));
                     Plugin.Log.LogInfo($"[TowerInject]   native field '{fieldName}' type='{typeName}'");
                 }
                 catch (Exception ex)

@@ -13,7 +13,6 @@ using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Il2CppCollections = Il2CppSystem.Collections.Generic;
 
-// Workaround: IL2CPP net6 BepInEx target missing NullableAttribute compiler support.
 namespace System.Runtime.CompilerServices
 {
     internal sealed class NullableAttribute : Attribute { public NullableAttribute(byte _) { } public NullableAttribute(byte[] _) { } }
@@ -35,47 +34,7 @@ public class Plugin : BasePlugin
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
-        PatchSoFractionsLookups();
         Log.LogInfo("TowerLegacy loaded.");
-    }
-
-    void PatchSoFractionsLookups()
-    {
-        try
-        {
-            // Only patch methods declared directly on SoFractions, not inherited Unity/Il2Cpp base methods.
-            var methods = typeof(SoFractions)
-                .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static)
-                .Where(m => m.DeclaringType == typeof(SoFractions)
-                         && m.GetParameters().Length >= 1
-                         && m.GetParameters()[0].ParameterType == typeof(string))
-                .ToList();
-
-            Log.LogInfo($"[TowerInject] SoFractions own string-param methods: {methods.Count}");
-            foreach (var m in methods)
-                Log.LogInfo($"[TowerInject]   {m.ReturnType.Name} {m.Name}({string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name))})");
-
-            foreach (var method in methods)
-            {
-                try
-                {
-                    Harmony.Patch(method,
-                        prefix: new HarmonyMethod(typeof(SoFractions_Redirect_Patch), nameof(SoFractions_Redirect_Patch.Prefix)));
-                    Log.LogInfo($"[TowerInject] Patched SoFractions.{method.Name}");
-                }
-                catch (Exception ex) { Log.LogWarning($"[TowerInject] SoFractions patch failed {method.Name}: {ex.Message}"); }
-            }
-        }
-        catch (Exception ex) { Log.LogError($"[TowerInject] PatchSoFractionsLookups failed: {ex}"); }
-    }
-}
-
-// Redirect any SoFractions lookup for "tower" → "human" until tower has real data.
-public static class SoFractions_Redirect_Patch
-{
-    public static void Prefix(ref string __0)
-    {
-        if (__0 == "tower") __0 = "human";
     }
 }
 
@@ -108,15 +67,19 @@ public static class ScFractionSelect_qwa_Patch
             if (arrObjPtr == IntPtr.Zero) { Plugin.Log.LogWarning("[TowerInject] fractions ptr zero."); return; }
 
             var arr = new Il2CppReferenceArray<FractionLobbyAsset>(arrObjPtr);
-            for (int i = 0; i < arr.Length; i++)
-                if (arr[i]?.sid == "tower") return;
+
+            // Check by index position instead of sid to avoid duplicate-check issues.
+            // If we already have more entries than the game's original count, skip.
+            // We track via a static flag instead.
+            if (_injectedQwa) return;
 
             FractionLobbyAsset src = null;
             for (int i = 0; i < arr.Length; i++)
                 if (arr[i]?.sid == "human") { src = arr[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human slot not found."); return; }
 
-            var slot   = BuildSlot(src);
+            // Keep sid=human so no downstream dict lookup for "tower" is triggered.
+            var slot   = BuildSlot(src, keepSid: true);
             var newArr = new Il2CppReferenceArray<FractionLobbyAsset>(arr.Length + 1);
             for (int i = 0; i < arr.Length; i++) newArr[i] = arr[i];
             newArr[arr.Length] = slot;
@@ -127,28 +90,41 @@ public static class ScFractionSelect_qwa_Patch
                 IL2CPP.Il2CppObjectBaseToPtrNotNull(newArr));
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
+            // Log all fields of FractionLobbyAsset so we can see what sid/name fields exist.
+            Plugin.Log.LogInfo("[TowerInject] FractionLobbyAsset fields:");
+            foreach (var f in typeof(FractionLobbyAsset).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            {
+                try { Plugin.Log.LogInfo($"[TowerInject]   {f.FieldType.Name} {f.Name} = {f.GetValue(slot)}"); }
+                catch { Plugin.Log.LogInfo($"[TowerInject]   {f.FieldType.Name} {f.Name} = <error>"); }
+            }
+
             var dictFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "dict_");
             var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
             if (dictObjPtr != IntPtr.Zero)
             {
                 var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
-                if (!dict.ContainsKey("tower")) { dict.Add("tower", slot); Plugin.Log.LogInfo("[TowerInject] dict_ updated."); }
+                // Don't add "tower" key — we're keeping sid=human to avoid KeyNotFound.
+                // Add a second "human" entry under a dummy key only if needed later.
+                Plugin.Log.LogInfo($"[TowerInject] dict_ has {dict.Count} entries, skipping tower key insert.");
             }
             else Plugin.Log.LogWarning("[TowerInject] dict_ is null, skipping.");
 
-            Plugin.Log.LogInfo("[TowerInject] Injected tower into SoFractions before qwa.");
+            _injectedQwa = true;
+            Plugin.Log.LogInfo("[TowerInject] Injected tower slot (sid=human) into SoFractions.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
 
-    internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src)
+    internal static bool _injectedQwa = false;
+
+    internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src, bool keepSid = false)
     {
         var slot = new FractionLobbyAsset();
         foreach (var f in typeof(FractionLobbyAsset).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
-        slot.sid = "tower";
+        if (!keepSid) slot.sid = "tower";
         return slot;
     }
 }
@@ -164,9 +140,6 @@ public static class ScFractionSelect_qwb_Patch
         {
             if (__result == null || __result.Count == 0) return;
 
-            for (int i = 0; i < __result.Count; i++)
-                if (__result[i]?.sid == "tower") return;
-
             var listPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(__result);
             if (_injected.Contains(listPtr)) return;
             _injected.Add(listPtr);
@@ -176,8 +149,9 @@ public static class ScFractionSelect_qwb_Patch
                 if (__result[i]?.sid == "human") { src = __result[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
-            __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
+            // Keep sid=human — no tower key needed yet.
+            __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src, keepSid: true));
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=human).");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }
@@ -207,12 +181,20 @@ internal static class TowerDbInjector
             if (listObj == null || dictObj == null)
             { Plugin.Log.LogWarning("[TowerInject] bxjw or bxjx missing."); return; }
 
-            if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
-            { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
-
             var humanCfg = FindByIdInList(listObj, "human");
             if (humanCfg == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
             Plugin.Log.LogInfo($"[TowerInject] human ok, id={humanCfg.id}");
+
+            // Log FractionConfig fields so we know what to override later.
+            Plugin.Log.LogInfo("[TowerInject] FractionConfig fields:");
+            foreach (var f in typeof(FractionConfig).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            {
+                try { Plugin.Log.LogInfo($"[TowerInject]   {f.FieldType.Name} {f.Name} = {f.GetValue(humanCfg)}"); }
+                catch { Plugin.Log.LogInfo($"[TowerInject]   {f.FieldType.Name} {f.Name} = <error>"); }
+            }
+
+            if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
+            { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
 
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
@@ -233,7 +215,7 @@ internal static class TowerDbInjector
             typedDict.Add("tower", tower);
 
             Plugin.DbInjected = true;
-            Plugin.Log.LogInfo("[TowerInject] tower injected.");
+            Plugin.Log.LogInfo("[TowerInject] tower injected into DB.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] Injection failed: {ex}"); }
     }

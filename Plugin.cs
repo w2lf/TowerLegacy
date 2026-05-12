@@ -32,7 +32,7 @@ public class Plugin : BasePlugin
     internal static readonly HashSet<IntPtr> TowerSlotPtrs = new HashSet<IntPtr>();
 
     // Il2Cpp object-pool internals — must never be copied between instances
-    static readonly HashSet<string> _skipFields = new HashSet<string>(StringComparer.Ordinal)
+    public static readonly HashSet<string> SkipFields = new HashSet<string>(StringComparer.Ordinal)
         { "pooledPtr", "isWrapped" };
 
     public override void Load()
@@ -102,7 +102,7 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[LocDump] {ex.Message}"); }
     }
 
-    // ── Localization patch ────────────────────────────────────────────────────
+    // ── Localization patch ────────────────────────────────────────────────────────────────────────
     internal static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
     {
         { "tower_name",   "Tower City" },
@@ -123,7 +123,6 @@ public class Plugin : BasePlugin
 
             foreach (var type in hexAsm.GetTypes())
             {
-                // Only obfuscated types (lowercase first char)
                 if (type.Name.Length == 0 || !char.IsLower(type.Name[0])) continue;
 
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
@@ -229,7 +228,7 @@ public static class ScFractionSelect_qwa_Patch
         foreach (var f in typeof(FractionLobbyAsset).GetFields(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
-            if (Plugin._skipFields.Contains(f.Name)) continue;
+            if (Plugin.SkipFields.Contains(f.Name)) continue;
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         }
 
@@ -237,8 +236,7 @@ public static class ScFractionSelect_qwa_Patch
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
-            if (Plugin._skipFields.Contains(p.Name)) continue;
-            // Skip ObjectClass / Pointer / WasCollected — Il2Cpp object identity
+            if (Plugin.SkipFields.Contains(p.Name)) continue;
             if (p.Name is "ObjectClass" or "Pointer" or "WasCollected") continue;
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
         }

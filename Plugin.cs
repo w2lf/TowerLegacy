@@ -137,7 +137,7 @@ internal static class TowerDbInjector
             var container = GetMember(repo, "bxni");
             if (container == null) { Plugin.Log.LogWarning("[TowerInject] repo.bxni not found."); return; }
 
-            var listObj = GetMember(container, "bxjw");
+            var listObj = GetMember(container, "bxni") ?? GetMember(container, "bxjw");
             var dictObj = GetMember(container, "bxjx");
             if (listObj == null || dictObj == null)
             { Plugin.Log.LogWarning("[TowerInject] bxjw or bxjx missing."); return; }
@@ -145,7 +145,7 @@ internal static class TowerDbInjector
             Plugin.Log.LogInfo($"[TowerInject] bxjw type = {listObj.GetType().FullName}");
             Plugin.Log.LogInfo($"[TowerInject] bxjx type = {dictObj.GetType().FullName}");
 
-            // Already injected
+            // Already injected?
             if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             {
                 Plugin.DbInjected = true;
@@ -153,33 +153,27 @@ internal static class TowerDbInjector
                 return;
             }
 
-            // Get typed human config via IL2CPP pointer cast
+            // Get typed human config
             var humanRaw = FindByIdInList(listObj, "human");
             if (humanRaw == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
 
-            // Cast the raw object to the typed FractionConfig using IL2CPP interop
             var human = humanRaw as FractionConfig
                         ?? new FractionConfig(((Il2CppSystem.Object)humanRaw).Pointer);
 
-            Plugin.Log.LogInfo($"[TowerInject] human typed cast ok, name = {human.name}");
+            Plugin.Log.LogInfo($"[TowerInject] human typed cast ok, id={human.id} name={human.name}");
 
-            // Create a new FractionConfig native object and copy typed properties
+            // Create new native FractionConfig and set only known-good properties
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
 
-            Plugin.Log.LogInfo("[TowerInject] tower native object created");
+            tower.id           = "tower";
+            tower.name         = "Tower";
+            tower.desc         = human.desc;
+            tower.narrativeDesc = human.narrativeDesc;
 
-            // Copy all typed properties from human, then override id and name
-            tower.id              = "tower";
-            tower.name            = "Tower";
-            tower.desc            = human.desc;
-            tower.narrativeDesc   = human.narrativeDesc;
-            tower.color           = human.color;
-            tower.isEnabled       = human.isEnabled;
+            Plugin.Log.LogInfo($"[TowerInject] tower.id={tower.id} tower.name={tower.name}");
 
-            Plugin.Log.LogInfo($"[TowerInject] tower.id = {tower.id}, tower.name = {tower.name}");
-
-            // Add to both collections using typed IL2Cpp list/dict
+            // Add to typed collections
             var typedList = listObj as Il2CppCollections.List<FractionConfig>
                             ?? new Il2CppCollections.List<FractionConfig>(
                                 ((Il2CppSystem.Object)listObj).Pointer);
@@ -226,9 +220,8 @@ internal static class TowerDbInjector
         return null;
     }
 
-    static object FindByIdInList(object listObj, string wantedId)
+    static FractionConfig FindByIdInList(object listObj, string wantedId)
     {
-        // Use typed list directly if possible
         try
         {
             var typedList = listObj as Il2CppCollections.List<FractionConfig>
@@ -239,25 +232,15 @@ internal static class TowerDbInjector
                 var item = typedList[i];
                 if (item != null && item.id == wantedId) return item;
             }
-            return null;
         }
-        catch
+        catch (Exception ex)
         {
-            // fallback to reflection-based id scan
-            var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
-            var itemProp = listObj.GetType().GetProperty("Item");
-            for (int i = 0; i < count; i++)
-            {
-                var item = itemProp.GetValue(listObj, new object[] { i });
-                if (item == null) continue;
-                var fc = item as FractionConfig;
-                if (fc != null && fc.id == wantedId) return item;
-            }
-            return null;
+            Plugin.Log.LogWarning($"[TowerInject] FindByIdInList failed: {ex.Message}");
         }
+        return null;
     }
 
-    static object FindByIdInDict(object dictObj, string wantedId)
+    static FractionConfig FindByIdInDict(object dictObj, string wantedId)
     {
         try
         {
@@ -266,15 +249,11 @@ internal static class TowerDbInjector
                                 ((Il2CppSystem.Object)dictObj).Pointer);
             if (typedDict.ContainsKey(wantedId))
                 return typedDict[wantedId];
-            return null;
         }
-        catch
+        catch (Exception ex)
         {
-            var containsKey = dictObj.GetType().GetMethod("ContainsKey");
-            var itemProp    = dictObj.GetType().GetProperty("Item");
-            if (containsKey != null && (bool)containsKey.Invoke(dictObj, new object[] { wantedId }))
-                return itemProp.GetValue(dictObj, new object[] { wantedId });
-            return null;
+            Plugin.Log.LogWarning($"[TowerInject] FindByIdInDict failed: {ex.Message}");
         }
+        return null;
     }
 }

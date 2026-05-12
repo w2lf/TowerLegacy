@@ -106,9 +106,18 @@ public class Plugin : BasePlugin
         { "tower_select", "Select Tower City" },
     };
 
-    // Only patch methods inside types whose name contains "loc" or "lang" (case-insensitive).
-    // This prevents the scatter-patch that was hitting thousands of unrelated (string)->string
-    // methods and causing Il2CppStringToManagedIntPtr crashes on null returns.
+    // Patch the staticTrue (string)->string methods identified from LocDump:
+    // io.hlt, io.jza, io.mrc, io.bpm, io.ela, lh.Generate, lh.hzd, lh.fav, lh.mjy,
+    // zr.heb, zr.dsw, zr.kbs, zr.kbt, zr.nme, zr.uc, zr.jxc, zr.kbp,
+    // bbj.cng, bbj.kgm, bbp.erg, bbp.fgs, bbp.ltb, bbp.kgx, bbp.giq,
+    // bbw.khu, bbw.iqu, bbw.hcv, bbw.fvo, bbw.kht, bbw.eof, bbw.lon, bbw.krl, bbw.kcf, bbw.bne,
+    // ccu.prx, cjt.rsb, cjt.neg, cjt.ivg, cjt.krb, cjt.kq, enz.bfkm,
+    // dk.gno, dk.mud, qc.iyf, qc.byo, qc.keo, qc.gfg, qc.iyt
+    static readonly string[] LocTypeNames = {
+        "io", "lh", "zr", "bbj", "bbp", "bbw", "ccu", "cjt", "enz",
+        "dk", "qc", "di"
+    };
+
     static void PatchLocalization()
     {
         try
@@ -117,16 +126,13 @@ public class Plugin : BasePlugin
                 .FirstOrDefault(a => a.GetName().Name == "Hex");
             if (hexAsm == null) { Log.LogWarning("[LocPatch] Hex assembly not found."); return; }
 
+            var locTypeSet = new HashSet<string>(LocTypeNames, StringComparer.Ordinal);
             int patched = 0;
-            var prefix = new HarmonyMethod(typeof(Plugin), nameof(LocPrefix));
+            var postfix = new HarmonyMethod(typeof(Plugin), nameof(LocPostfix));
 
             foreach (var type in hexAsm.GetTypes())
             {
-                // Only consider types whose name hints at localization
-                var tname = type.Name.ToLowerInvariant();
-                bool isLocType = tname.Contains("loc") || tname.Contains("lang")
-                              || tname.Contains("local") || tname.Contains("translate");
-                if (!isLocType) continue;
+                if (!locTypeSet.Contains(type.Name)) continue;
 
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                    BindingFlags.Instance | BindingFlags.Static))
@@ -139,7 +145,9 @@ public class Plugin : BasePlugin
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
                         if (m.Name.StartsWith("set_") || m.Name.StartsWith("get_")) continue;
 
-                        Harmony.Patch(m, prefix: prefix);
+                        // Use Postfix so the original runs (returns real string for normal keys)
+                        // and we only override when the key is ours.
+                        Harmony.Patch(m, postfix: postfix);
                         patched++;
                         Log.LogInfo($"[LocPatch] Patched {type.Name}.{m.Name}");
                     }
@@ -148,32 +156,26 @@ public class Plugin : BasePlugin
             }
 
             if (patched == 0)
-            {
-                // Fallback: no loc-named types found — log a warning so we can see
-                // which types DO exist and pick the right one from LocDump output.
-                Log.LogWarning("[LocPatch] No loc-named types found — check [LocDump] lines above for the real type name.");
-            }
+                Log.LogWarning("[LocPatch] No target types found — LocTypeNames may need updating.");
 
             Log.LogInfo($"[LocPatch] Patched {patched} loc method(s) in Hex.");
         }
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
-    // Prefix: intercept before the native call so Il2CppInterop never tries to
-    // marshal a null/invalid IntPtr for keys we override.
-    public static bool LocPrefix(string __0, ref string __result)
+    // Postfix: runs after the original. Only override when the key is ours.
+    // __0 = first param (the key), __result = current return value.
+    public static void LocPostfix(string __0, ref string __result)
     {
         try
         {
             if (__0 != null && LocOverrides.TryGetValue(__0, out var val))
             {
-                Log.LogInfo($"[LocPatch] Intercepted '{__0}' -> '{val}'");
+                Log.LogInfo($"[LocPatch] Override '{__0}' -> '{val}'");
                 __result = val;
-                return false; // skip original
             }
         }
         catch { }
-        return true; // let original run
     }
 }
 
@@ -293,6 +295,9 @@ public static class ScFractionSelect_qwb_Patch
 
     public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
     {
+        // Guard: only run after DB is fully loaded to avoid null-array crashes.
+        if (!Plugin.DbInjected) return;
+
         try
         {
             if (__result == null || __result.Count == 0) return;

@@ -57,7 +57,6 @@ public class Plugin : BasePlugin
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod(true);
             if (getSid == null)
             {
-                // Try by name directly
                 getSid = typeof(FractionLobbyAsset).GetMethod("get_sid",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             }
@@ -82,11 +81,20 @@ public class Plugin : BasePlugin
     }
 
     // ── Localization patch ────────────────────────────────────────────────────
-    static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
+    internal static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
     {
         { "tower_name",   "Tower City" },
         { "tower_desc",   "A city built around a great tower." },
         { "tower_select", "Select Tower City" },
+    };
+
+    // Known method names used by localization systems in obfuscated Unity IL2CPP games.
+    // We ONLY patch methods whose name matches one of these — never blind-scan all (string)->string.
+    static readonly HashSet<string> LocMethodNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "Get", "GetString", "GetText", "Translate", "Localize",
+        "GetValue", "Lookup", "GetLocalized", "GetLocalizedString",
+        "GetKey", "GetEntry",
     };
 
     static void PatchLocalization()
@@ -105,18 +113,46 @@ public class Plugin : BasePlugin
                 {
                     try
                     {
+                        // Only target methods with a name that looks like a localization getter
+                        if (!LocMethodNames.Contains(m.Name)) continue;
                         if (m.ReturnType != typeof(string)) continue;
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
-                        if (m.Name.StartsWith("set_")) continue;
 
                         Harmony.Patch(m, postfix: new HarmonyMethod(typeof(Plugin), nameof(LocPostfix)));
+                        Log.LogInfo($"[LocPatch] Patched {type.FullName}.{m.Name}");
                         patched++;
                     }
                     catch { }
                 }
             }
-            Log.LogInfo($"[LocPatch] Patched {patched} (string)->string method(s) in Hex.");
+
+            if (patched == 0)
+            {
+                Log.LogWarning("[LocPatch] No named loc methods found. Falling back to obfuscated scan (2-char names only).");
+                // Fallback: only patch short obfuscated-looking names (2-3 chars) — far fewer than 640
+                foreach (var type in hexAsm.GetTypes())
+                {
+                    foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                       BindingFlags.Instance | BindingFlags.Static))
+                    {
+                        try
+                        {
+                            if (m.Name.Length > 4) continue; // obfuscated names are short
+                            if (m.ReturnType != typeof(string)) continue;
+                            var parms = m.GetParameters();
+                            if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
+
+                            Harmony.Patch(m, postfix: new HarmonyMethod(typeof(Plugin), nameof(LocPostfix)));
+                            Log.LogInfo($"[LocPatch] Patched (fallback) {type.FullName}.{m.Name}");
+                            patched++;
+                        }
+                        catch { }
+                    }
+                }
+            }
+
+            Log.LogInfo($"[LocPatch] Patched {patched} string->string method(s) in Hex.");
         }
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
@@ -125,6 +161,9 @@ public class Plugin : BasePlugin
     {
         try
         {
+            // Guard: null result means the native method returned a null Il2Cpp string —
+            // do not touch it, otherwise Il2CppStringToManagedIntPtr will throw.
+            if (__result == null) return;
             if (__0 != null && LocOverrides.TryGetValue(__0, out var val))
             {
                 Log.LogInfo($"[LocPatch] Intercepted key '{__0}' → '{val}'");
@@ -198,8 +237,6 @@ public static class ScFractionSelect_qwa_Patch
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
 
-        // !! sid stays "human" at the managed level — get_sid patch overrides it
-        // when the ptr is in TowerSlotPtrs.
         var slotPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(slot);
         Plugin.TowerSlotPtrs.Add(slotPtr);
         Plugin.Log.LogInfo($"[TowerInject] Tower slot ptr registered: 0x{slotPtr:X}");

@@ -62,7 +62,7 @@ public static class ScLobby2_Init_Patch
     }
 }
 
-// Runs BEFORE qwa spawns UI slots — injects tower into SoFractions.fractions + dict_
+// Injects tower into SoFractions.fractions array + dict_ before qwa spawns slots.
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwa))]
 public static class ScFractionSelect_qwa_Patch
 {
@@ -76,32 +76,20 @@ public static class ScFractionSelect_qwa_Patch
             var soClassPtr = Il2CppClassPointerStore<SoFractions>.NativeClassPtr;
             var objPtr     = IL2CPP.Il2CppObjectBaseToPtrNotNull(assets);
 
-            // ─ fractions array ───────────────────────────────────────────
             var arrFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "fractions");
             var arrObjPtr   = IL2CPP.il2cpp_field_get_value_object(arrFieldPtr, objPtr);
             if (arrObjPtr == IntPtr.Zero) { Plugin.Log.LogWarning("[TowerInject] fractions ptr zero."); return; }
 
             var arr = new Il2CppReferenceArray<FractionLobbyAsset>(arrObjPtr);
-
-            // Already injected — don't double-add
             for (int i = 0; i < arr.Length; i++)
-                if (arr[i]?.sid == "tower") return;
+                if (arr[i]?.sid == "tower") return; // already done
 
             FractionLobbyAsset src = null;
             for (int i = 0; i < arr.Length; i++)
                 if (arr[i]?.sid == "human") { src = arr[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human slot not found."); return; }
 
-            var slot = new FractionLobbyAsset
-            {
-                sid          = "tower",
-                icon         = src.icon,
-                slotFon      = src.slotFon,
-                statisticFon = src.statisticFon,
-                versusFon    = src.versusFon,
-                bigIcon      = src.bigIcon,
-                card         = src.card
-            };
+            var slot = BuildSlot(src);
 
             var newArr = new Il2CppReferenceArray<FractionLobbyAsset>(arr.Length + 1);
             for (int i = 0; i < arr.Length; i++) newArr[i] = arr[i];
@@ -114,17 +102,12 @@ public static class ScFractionSelect_qwa_Patch
 
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
-            // ─ dict_ ───────────────────────────────────────────────────
             var dictFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "dict_");
             var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
             if (dictObjPtr != IntPtr.Zero)
             {
                 var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
-                if (!dict.ContainsKey("tower"))
-                {
-                    dict.Add("tower", slot);
-                    Plugin.Log.LogInfo("[TowerInject] dict_ updated.");
-                }
+                if (!dict.ContainsKey("tower")) { dict.Add("tower", slot); Plugin.Log.LogInfo("[TowerInject] dict_ updated."); }
             }
             else Plugin.Log.LogWarning("[TowerInject] dict_ is null, skipping.");
 
@@ -132,9 +115,54 @@ public static class ScFractionSelect_qwa_Patch
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
+
+    internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src) => new FractionLobbyAsset
+    {
+        sid          = "tower",
+        icon         = src.icon,
+        slotFon      = src.slotFon,
+        statisticFon = src.statisticFon,
+        versusFon    = src.versusFon,
+        bigIcon      = src.bigIcon,
+        card         = src.card
+    };
 }
 
-// Name patches — intercept whatever string getter the UI uses for faction name
+// qwb postfix — deduped per list instance via native pointer tracking.
+// This is the method that builds the list qwa iterates to spawn UI slots.
+[HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
+public static class ScFractionSelect_qwb_Patch
+{
+    // Track pointers of lists we've already injected into this session.
+    static readonly HashSet<IntPtr> _injected = new();
+
+    public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
+    {
+        try
+        {
+            if (__result == null || __result.Count == 0) return;
+
+            // Use the native list pointer as identity — same list object = already patched.
+            var listPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(__result);
+            if (_injected.Contains(listPtr)) return;
+
+            // Also check by content in case pointer reuse happens.
+            for (int i = 0; i < __result.Count; i++)
+                if (__result[i]?.sid == "tower") { _injected.Add(listPtr); return; }
+
+            FractionLobbyAsset src = null;
+            for (int i = 0; i < __result.Count; i++)
+                if (__result[i]?.sid == "human") { src = __result[i]; break; }
+            if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
+
+            __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
+            _injected.Add(listPtr);
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
+        }
+        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
+    }
+}
+
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {

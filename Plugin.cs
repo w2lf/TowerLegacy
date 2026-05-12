@@ -39,19 +39,19 @@ public class Plugin : BasePlugin
         Log.LogInfo("TowerLegacy loaded.");
     }
 
-    // Patch every method on SoFractions that takes a string as first param.
-    // If the string is "tower", redirect to "human" so array lookups don't return null.
     void PatchSoFractionsLookups()
     {
         try
         {
+            // Only patch methods declared directly on SoFractions, not inherited Unity/Il2Cpp base methods.
             var methods = typeof(SoFractions)
                 .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static)
-                .Where(m => m.GetParameters().Length >= 1
+                .Where(m => m.DeclaringType == typeof(SoFractions)
+                         && m.GetParameters().Length >= 1
                          && m.GetParameters()[0].ParameterType == typeof(string))
                 .ToList();
 
-            Log.LogInfo($"[TowerInject] SoFractions string-param methods: {methods.Count}");
+            Log.LogInfo($"[TowerInject] SoFractions own string-param methods: {methods.Count}");
             foreach (var m in methods)
                 Log.LogInfo($"[TowerInject]   {m.ReturnType.Name} {m.Name}({string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name))})");
 

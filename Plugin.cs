@@ -37,49 +37,23 @@ public class Plugin : BasePlugin
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
 
-        PatchFlaGetSid();
         PatchLocalization();
 
         Log.LogInfo("TowerLegacy loaded.");
     }
 
-    // ── FractionLobbyAsset.get_sid patch ─────────────────────────────────────
-    static void PatchFlaGetSid()
-    {
-        try
-        {
-            var getSid = typeof(FractionLobbyAsset).GetProperty("sid",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod(true);
-            if (getSid == null)
-                getSid = typeof(FractionLobbyAsset).GetMethod("get_sid",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (getSid == null) { Log.LogWarning("[SidPatch] FractionLobbyAsset.get_sid not found."); return; }
-
-            Harmony.Patch(getSid, postfix: new HarmonyMethod(typeof(Plugin), nameof(GetSidPostfix)));
-            Log.LogInfo("[SidPatch] Patched FractionLobbyAsset.get_sid.");
-        }
-        catch (Exception ex) { Log.LogWarning($"[SidPatch] {ex.Message}"); }
-    }
-
-    public static void GetSidPostfix(object __instance, ref string __result)
-    {
-        try
-        {
-            if (__instance == null) return;
-            var ptr = IL2CPP.Il2CppObjectBaseToPtrNotNull((Il2CppSystem.Object)__instance);
-            if (TowerSlotPtrs.Contains(ptr))
-                __result = "tower";
-        }
-        catch { }
-    }
-
     // ── Localization patch ────────────────────────────────────────────────────
+    // Only patch the 3 known obfuscated loc methods (cnqevl, cnqcfg, cnqszb).
+    // Patching all 640 string->string methods caused runtime crashes.
     internal static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
     {
         { "tower_name",   "Tower City" },
         { "tower_desc",   "A city built around a great tower." },
         { "tower_select", "Select Tower City" },
     };
+
+    // Names of the obfuscated localization methods found in the Hex assembly.
+    static readonly string[] LocMethodNames = { "cnqevl", "cnqcfg", "cnqszb" };
 
     static void PatchLocalization()
     {
@@ -90,7 +64,7 @@ public class Plugin : BasePlugin
             if (hexAsm == null) { Log.LogWarning("[LocPatch] Hex assembly not found."); return; }
 
             int patched = 0;
-            var prefix = new HarmonyMethod(typeof(Plugin), nameof(LocPrefix));
+            var postfix = new HarmonyMethod(typeof(Plugin), nameof(LocPostfix));
 
             foreach (var type in hexAsm.GetTypes())
             {
@@ -99,38 +73,35 @@ public class Plugin : BasePlugin
                 {
                     try
                     {
-                        if (m.IsAbstract) continue;
+                        if (!LocMethodNames.Contains(m.Name)) continue;
                         if (m.ReturnType != typeof(string)) continue;
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
-                        if (m.Name.StartsWith("set_")) continue;
 
-                        Harmony.Patch(m, prefix: prefix);
+                        Harmony.Patch(m, postfix: postfix);
                         patched++;
+                        Log.LogInfo($"[LocPatch] Patched {type.Name}.{m.Name}");
                     }
                     catch { }
                 }
             }
 
-            Log.LogInfo($"[LocPatch] Patched {patched} string->string method(s) in Hex.");
+            Log.LogInfo($"[LocPatch] Patched {patched} loc method(s) in Hex.");
         }
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
-    // Harmony passes the already-marshalled managed string — just accept string directly.
-    public static bool LocPrefix(string __0, ref string __result)
+    public static void LocPostfix(string __0, ref string __result)
     {
         try
         {
             if (__0 != null && LocOverrides.TryGetValue(__0, out var val))
             {
-                Log.LogInfo($"[LocPatch] Intercepted key '{__0}' → '{val}'");
+                Log.LogInfo($"[LocPatch] Intercepted '{__0}' -> '{val}'");
                 __result = val;
-                return false;
             }
         }
         catch { }
-        return true;
     }
 }
 
@@ -197,9 +168,21 @@ public static class ScFractionSelect_qwa_Patch
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
 
-        var slotPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(slot);
-        Plugin.TowerSlotPtrs.Add(slotPtr);
-        Plugin.Log.LogInfo($"[TowerInject] Tower slot ptr registered: 0x{slotPtr:X}");
+        // Set sid via the backing field directly (get_sid is a field accessor, can't be harmony-patched)
+        var sidField = typeof(FractionLobbyAsset).GetField("sid",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (sidField != null)
+        {
+            sidField.SetValue(slot, "tower");
+            Plugin.Log.LogInfo("[TowerInject] Set sid backing field to 'tower' directly.");
+        }
+        else
+        {
+            // Fallback: register ptr so a postfix could intercept if needed
+            var slotPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(slot);
+            Plugin.TowerSlotPtrs.Add(slotPtr);
+            Plugin.Log.LogInfo($"[TowerInject] Tower slot ptr registered (sid field not found): 0x{slotPtr:X}");
+        }
 
         return slot;
     }
@@ -225,7 +208,7 @@ public static class ScFractionSelect_qwb_Patch
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
             __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=tower via ptr patch).");
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=tower via field set).");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }

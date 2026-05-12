@@ -296,21 +296,40 @@ public static class ScFractionSelect_qwb_Patch
 
     public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
     {
-        // Guard 1: DB must be fully loaded before we touch lobby assets.
-        if (!Plugin.DbInjected) return;
-
-        // Guard 2: only inject once per lobby open (reset by ScLobby2.Init postfix).
-        if (_lobbyInjected)
-        {
-            Plugin.Log.LogInfo("[TowerInject] qwb: lobby already injected, skipping.");
-            return;
-        }
-
-        // Guard 3: null/empty list means the method fired before assets were ready.
+        // Guard 0 (FIRST): null/empty list — fires before assets are ready, or on
+        // a re-entry where the game passes a fresh null list. Must be checked before
+        // anything else to prevent NullReferenceException inside the guard branches.
         if (__result == null || __result.Count == 0)
         {
             Plugin.Log.LogWarning("[TowerInject] qwb: result null or empty — skipping premature call.");
             return;
+        }
+
+        // Guard 1: DB must be fully loaded before we touch lobby assets.
+        if (!Plugin.DbInjected) return;
+
+        // Guard 2: only inject once per lobby open (reset by ScLobby2.Init postfix).
+        // Check whether our slot is already present rather than relying solely on
+        // the bool flag, in case the list was rebuilt between calls.
+        if (_lobbyInjected)
+        {
+            bool found = false;
+            try
+            {
+                for (int i = 0; i < __result.Count; i++)
+                    if (__result[i]?.sid == "tower") { found = true; break; }
+            }
+            catch { /* list may be partially constructed; treat as not-found */ }
+
+            if (found)
+            {
+                Plugin.Log.LogInfo("[TowerInject] qwb: lobby already injected, skipping.");
+                return;
+            }
+
+            // Flag was set but slot is gone (list was rebuilt) — fall through to re-inject.
+            Plugin.Log.LogInfo("[TowerInject] qwb: flag set but slot missing — re-injecting.");
+            _lobbyInjected = false;
         }
 
         try
@@ -321,6 +340,12 @@ public static class ScFractionSelect_qwb_Patch
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
             __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
+
+            // TrimExcess forces the IL2CPP List to synchronise its internal
+            // backing array length with Count, preventing the ArgumentNullException
+            // that occurs when Unity reads the raw array immediately after Add().
+            try { __result.TrimExcess(); } catch { }
+
             _lobbyInjected = true;
             Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
         }

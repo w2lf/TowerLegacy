@@ -42,12 +42,77 @@ public class Plugin : BasePlugin
 
     internal const string TowerDisplayName = "Tower";
 
+    // Loc key overrides: key → display string
+    internal static readonly Dictionary<string, string> LocOverrides = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["tower_name"] = TowerDisplayName,
+        ["tower_desc"] = "A mighty tower faction.",
+    };
+
     public override void Load()
     {
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
+        PatchLocKit();
         Log.LogInfo("TowerLegacy loaded.");
+    }
+
+    // Patch LocKit at runtime via reflection since we don’t have a compile-time type reference.
+    void PatchLocKit()
+    {
+        try
+        {
+            var locKitType = AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => { try { return a.GetTypes(); } catch { return Array.Empty<Type>(); } })
+                .FirstOrDefault(t => t.Name == "LocKit");
+
+            if (locKitType == null) { Log.LogWarning("[TowerInject] LocKit type not found."); return; }
+
+            // Find the string→string getter (most likely: string Get(string key) or similar)
+            var candidates = locKitType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance)
+                .Where(m => m.ReturnType == typeof(string)
+                         && m.GetParameters().Length >= 1
+                         && m.GetParameters()[0].ParameterType == typeof(string))
+                .ToList();
+
+            Log.LogInfo($"[TowerInject] LocKit candidates: {candidates.Count}");
+            foreach (var c in candidates)
+                Log.LogInfo($"[TowerInject]   LocKit method: {c.Name}({string.Join(", ", c.GetParameters().Select(p => p.ParameterType.Name))})");
+
+            // Patch all candidates — our prefix returns false (skip original) only when key is known.
+            foreach (var method in candidates)
+            {
+                try
+                {
+                    Harmony.Patch(method,
+                        prefix: new HarmonyMethod(typeof(LocKit_Get_Patch), nameof(LocKit_Get_Patch.Prefix)));
+                    Log.LogInfo($"[TowerInject] Patched LocKit.{method.Name}");
+                }
+                catch (Exception ex) { Log.LogWarning($"[TowerInject] LocKit patch failed for {method.Name}: {ex.Message}"); }
+            }
+        }
+        catch (Exception ex) { Log.LogError($"[TowerInject] PatchLocKit failed: {ex}"); }
+    }
+}
+
+// Intercepts any LocKit string getter where first param is our key.
+public static class LocKit_Get_Patch
+{
+    public static bool Prefix(object[] __args, ref string __result)
+    {
+        try
+        {
+            if (__args == null || __args.Length == 0) return true;
+            var key = __args[0] as string;
+            if (key != null && Plugin.LocOverrides.TryGetValue(key, out var val))
+            {
+                __result = val;
+                return false; // skip original
+            }
+        }
+        catch { }
+        return true;
     }
 }
 
@@ -62,7 +127,6 @@ public static class ScLobby2_Init_Patch
     }
 }
 
-// Injects tower into SoFractions.fractions array + dict_ before qwa spawns slots.
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwa))]
 public static class ScFractionSelect_qwa_Patch
 {
@@ -82,7 +146,7 @@ public static class ScFractionSelect_qwa_Patch
 
             var arr = new Il2CppReferenceArray<FractionLobbyAsset>(arrObjPtr);
             for (int i = 0; i < arr.Length; i++)
-                if (arr[i]?.sid == "tower") return; // already done
+                if (arr[i]?.sid == "tower") return;
 
             FractionLobbyAsset src = null;
             for (int i = 0; i < arr.Length; i++)
@@ -128,12 +192,10 @@ public static class ScFractionSelect_qwa_Patch
     };
 }
 
-// qwb postfix — deduped per list instance via native pointer tracking.
-// This is the method that builds the list qwa iterates to spawn UI slots.
+// qwb builds the list qwa iterates. Dedup by content first, then cache pointer.
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {
-    // Track pointers of lists we've already injected into this session.
     static readonly HashSet<IntPtr> _injected = new();
 
     public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
@@ -142,13 +204,12 @@ public static class ScFractionSelect_qwb_Patch
         {
             if (__result == null || __result.Count == 0) return;
 
-            // Use the native list pointer as identity — same list object = already patched.
+            // Content check first — handles pointer reuse and fresh lists alike.
+            for (int i = 0; i < __result.Count; i++)
+                if (__result[i]?.sid == "tower") return;
+
             var listPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(__result);
             if (_injected.Contains(listPtr)) return;
-
-            // Also check by content in case pointer reuse happens.
-            for (int i = 0; i < __result.Count; i++)
-                if (__result[i]?.sid == "tower") { _injected.Add(listPtr); return; }
 
             FractionLobbyAsset src = null;
             for (int i = 0; i < __result.Count; i++)

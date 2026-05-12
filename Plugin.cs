@@ -33,7 +33,8 @@ public class Plugin : BasePlugin
     {
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
-        Harmony.PatchAll();
+        Harmony.PatchAll();                          // standard attribute patches
+        LocalizationPatch.Apply(Harmony);            // manual scan-and-patch for loc methods
         Log.LogInfo("TowerLegacy loaded.");
     }
 }
@@ -56,8 +57,6 @@ internal static class TowerFaction
         "Ebonveil", "The Bastion", "Coldforge", "Mirethian",
     };
 
-    // Localization keys the game will request for this faction.
-    // We intercept them in LocalizationPatch and return the plain strings above.
     public const string KeyName          = "tower_name";
     public const string KeyDesc          = "tower_desc";
     public const string KeyNarrativeDesc = "tower_narrative_desc";
@@ -76,46 +75,57 @@ internal static class TowerFaction
     }
 }
 
-// ── LOCALIZATION INTERCEPT ─────────────────────────────────────────────────────
-// Patch every possible localization method signature the game might call.
-// The game resolves "{sid}_name" etc. through its loc system.
-// We intercept before the return and substitute our strings.
-
-[HarmonyPatch]
+// ── LOCALIZATION INTERCEPT (manual patch, NOT [HarmonyPatch]) ────────────────────────
 public static class LocalizationPatch
 {
-    // Find all methods named "Get", "GetString", "Translate" etc. across all types
-    // in the Hex assembly and patch the ones that take a single string key.
-    static IEnumerable<MethodBase> TargetMethods()
+    static readonly HarmonyMethod _postfix =
+        new HarmonyMethod(typeof(LocalizationPatch), nameof(Postfix));
+
+    static readonly string[] CandidateNames =
+        { "Get", "GetString", "Translate", "GetText", "Localize" };
+
+    public static void Apply(Harmony harmony)
     {
         var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
             .FirstOrDefault(a => a.GetName().Name == "Hex");
-        if (hexAsm == null) yield break;
+        if (hexAsm == null)
+        {
+            Plugin.Log.LogWarning("[TowerLoc] Hex assembly not found, skipping loc patch.");
+            return;
+        }
 
-        var candidates = new[] { "Get", "GetString", "Translate", "GetText", "Localize" };
+        int count = 0;
         foreach (var type in hexAsm.GetTypes())
         {
-            foreach (var name in candidates)
+            foreach (var name in CandidateNames)
             {
-                var m = type.GetMethod(name,
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance,
-                    null,
-                    new[] { typeof(string) },
-                    null);
-                if (m != null && m.ReturnType == typeof(string))
-                    yield return m;
+                try
+                {
+                    var m = type.GetMethod(name,
+                        BindingFlags.Public | BindingFlags.NonPublic |
+                        BindingFlags.Static | BindingFlags.Instance,
+                        null, new[] { typeof(string) }, null);
+
+                    if (m == null || m.ReturnType != typeof(string)) continue;
+
+                    harmony.Patch(m, postfix: _postfix);
+                    count++;
+                    Plugin.Log.LogInfo($"[TowerLoc] Patched {type.Name}.{name}");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[TowerLoc] Could not patch {type.Name}.{name}: {ex.Message}");
+                }
             }
         }
+        Plugin.Log.LogInfo($"[TowerLoc] Patched {count} localization method(s).");
     }
 
+    // Postfix signature: __0 = first param (the key), __result = return value
     static void Postfix(string __0, ref string __result)
     {
-        try
-        {
-            if (__0 != null && TowerFaction.TryGetLocalized(__0, out var v))
-                __result = v;
-        }
-        catch { }
+        if (__0 != null && TowerFaction.TryGetLocalized(__0, out var v))
+            __result = v;
     }
 }
 
@@ -168,7 +178,6 @@ public static class ScFractionSelect_qwa_Patch
                 IL2CPP.Il2CppObjectBaseToPtrNotNull(newArr));
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
-            // Also inject into dict_ so lookups by sid="tower" succeed.
             var dictFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "dict_");
             var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
             if (dictObjPtr != IntPtr.Zero)
@@ -197,7 +206,6 @@ public static class ScFractionSelect_qwa_Patch
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
-        // Give it the tower sid so the UI resolves "tower_name" from the loc system.
         slot.sid = TowerFaction.Id;
         return slot;
     }
@@ -267,9 +275,7 @@ internal static class TowerDbInjector
             foreach (var p in typeof(FractionConfig).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 try { if (p.CanRead && p.CanWrite) p.SetValue(tower, p.GetValue(humanCfg)); } catch { }
 
-            // ── Overrides ─────────────────────────────────────────────
-            tower.id           = TowerFaction.Id;
-            // Use loc keys so the localization system (and our patch) resolves them.
+            tower.id            = TowerFaction.Id;
             tower.name          = TowerFaction.KeyName;
             tower.desc          = TowerFaction.KeyDesc;
             tower.narrativeDesc = TowerFaction.KeyNarrativeDesc;

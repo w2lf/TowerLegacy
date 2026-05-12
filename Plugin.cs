@@ -30,7 +30,6 @@ public class Plugin : BasePlugin
     }
 }
 
-// Hook ScLobby2.Init — config DB is fully loaded by this point
 [HarmonyPatch(typeof(ScLobby2), nameof(ScLobby2.Init))]
 public static class ScLobby2_Init_Patch
 {
@@ -41,7 +40,6 @@ public static class ScLobby2_Init_Patch
     }
 }
 
-// Hook the faction picker list — runs every time the window opens
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {
@@ -97,7 +95,6 @@ public static class ScFractionSelect_qwb_Patch
     }
 }
 
-// Patch get_Name / get_name on FractionConfig — whichever the game uses
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {
@@ -118,8 +115,6 @@ public static class FractionConfig_get_name_Patch
     }
 }
 
-// Safety net: patch the localization Translate method to intercept the tower
-// faction name if get_Name/get_name patches don't fire.
 [HarmonyPatch]
 public static class LocalizationTranslate_Patch
 {
@@ -157,8 +152,6 @@ public static class LocalizationTranslate_Patch
 
     public static void Postfix(string __0, ref string __result)
     {
-        // Safety net only — TryNullNameField + get_Name patches handle naming.
-        // Nothing to do here unless those fail.
         _ = __0;
     }
 }
@@ -211,6 +204,9 @@ internal static class TowerDbInjector
                 return;
             }
 
+            // Dump every field on Human so we can see exactly which one holds the name
+            DumpAllFields(fractionType, human);
+
             Plugin.Log.LogInfo("[TowerInject] Cloning human into tower...");
 
             var tower = Activator.CreateInstance(fractionType);
@@ -236,6 +232,29 @@ internal static class TowerDbInjector
     {
         try { return GetId(cfg); }
         catch { return null; }
+    }
+
+    // Dump every field name, type, and value on the human config.
+    // Run this once to find the field that holds "Temple" / "Human".
+    static void DumpAllFields(Type rootType, object obj)
+    {
+        Plugin.Log.LogInfo("[TowerInject] === FractionConfig field dump ===");
+        foreach (var t in GetTypeChain(rootType))
+        {
+            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                try
+                {
+                    var val = f.GetValue(obj);
+                    Plugin.Log.LogInfo($"[TowerInject] FIELD {f.Name} ({f.FieldType.Name}) = {val}");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogInfo($"[TowerInject] FIELD {f.Name} ({f.FieldType.Name}) = <error: {ex.Message}>");
+                }
+            }
+        }
+        Plugin.Log.LogInfo("[TowerInject] === end field dump ===");
     }
 
     static void CopyAllFields(Type rootType, object src, object dst)
@@ -265,6 +284,11 @@ internal static class TowerDbInjector
                 }
                 var ftn = ft.FullName ?? "";
                 if (ftn.Contains("Il2CppSystem.Collections") || ftn.Contains("Il2CppInterop"))
+                    continue;
+
+                // Skip all non-primitive reference types except string
+                // to avoid IL2Cpp object graph issues
+                if (!ft.IsValueType && ft != typeof(string) && !ft.IsEnum)
                     continue;
 
                 try { f.SetValue(dst, f.GetValue(src)); }
@@ -303,6 +327,7 @@ internal static class TowerDbInjector
                 }
             }
         }
+        Plugin.Log.LogWarning("[TowerInject] TryNullNameField: no name field found on FractionConfig.");
     }
 
     static void SetId(object cfg, string newId)

@@ -28,124 +28,110 @@ public class Plugin : BasePlugin
     internal static new ManualLogSource Log;
     internal static Harmony Harmony;
     internal static bool DbInjected;
-    internal static bool SlotDumped;
+
+    // Pointers of FractionLobbyAsset instances we created, so get_sid can
+    // return "tower" for them specifically.
+    internal static readonly HashSet<IntPtr> TowerSlotPtrs = new HashSet<IntPtr>();
 
     public override void Load()
     {
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
+
+        // Patch FractionLobbyAsset.get_sid so our injected slot reports "tower"
+        PatchFlaGetSid();
+
+        // Patch the localization system so "tower_name" etc. resolve correctly
+        PatchLocalization();
+
         Log.LogInfo("TowerLegacy loaded.");
     }
 
-    internal static void DumpAndPatchSlotSetters()
+    // ── FractionLobbyAsset.get_sid patch ─────────────────────────────────────
+    static void PatchFlaGetSid()
     {
-        if (SlotDumped) return;
-        SlotDumped = true;
         try
         {
-            // Log every loaded assembly name so we know what's available
-            var allAsms = AppDomain.CurrentDomain.GetAssemblies();
-            Log.LogInfo($"[SlotDump] Loaded assemblies ({allAsms.Length}):");
-            foreach (var a in allAsms)
-                Log.LogInfo($"[SlotDump]   {a.GetName().Name}");
-
-            int found = 0;
-            foreach (var asm in allAsms)
+            var getSid = typeof(FractionLobbyAsset).GetProperty("sid",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod(true);
+            if (getSid == null)
             {
-                // Skip obviously irrelevant assemblies to avoid noise
-                var asmName = asm.GetName().Name ?? "";
-                if (asmName.StartsWith("System") || asmName.StartsWith("Microsoft") ||
-                    asmName.StartsWith("mscorlib") || asmName.StartsWith("BepInEx") ||
-                    asmName.StartsWith("Il2Cpp") || asmName.StartsWith("Mono") ||
-                    asmName.StartsWith("Unity") || asmName == "TowerLegacy")
-                    continue;
-
-                try
-                {
-                    foreach (var type in asm.GetTypes())
-                    {
-                        foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
-                        {
-                            try
-                            {
-                                var parms = m.GetParameters();
-                                bool takesFla = parms.Any(p =>
-                                    p.ParameterType.Name == "FractionLobbyAsset" ||
-                                    p.ParameterType.FullName?.Contains("FractionLobbyAsset") == true);
-                                if (!takesFla) continue;
-
-                                // Skip property setters — they can't be patched
-                                if (m.Name.StartsWith("set_")) continue;
-
-                                Log.LogInfo($"[SlotDump] [{asmName}] {type.Name}.{m.Name}({string.Join(", ", parms.Select(p => p.ParameterType.Name + " " + p.Name))})");
-                                found++;
-
-                                var postfix = new HarmonyMethod(typeof(Plugin), nameof(SlotSetterPostfix));
-                                try { Harmony.Patch(m, postfix: postfix); }
-                                catch (Exception pe) { Log.LogWarning($"[SlotDump] Cannot patch {type.Name}.{m.Name}: {pe.Message}"); }
-                            }
-                            catch { }
-                        }
-                    }
-                }
-                catch { }
+                // Try by name directly
+                getSid = typeof(FractionLobbyAsset).GetMethod("get_sid",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             }
-            Log.LogInfo($"[SlotDump] Done. {found} patchable method(s) found.");
+            if (getSid == null) { Log.LogWarning("[SidPatch] FractionLobbyAsset.get_sid not found."); return; }
+
+            Harmony.Patch(getSid, postfix: new HarmonyMethod(typeof(Plugin), nameof(GetSidPostfix)));
+            Log.LogInfo("[SidPatch] Patched FractionLobbyAsset.get_sid.");
         }
-        catch (Exception ex) { Log.LogWarning($"[SlotDump] Failed: {ex.Message}"); }
+        catch (Exception ex) { Log.LogWarning($"[SidPatch] {ex.Message}"); }
     }
 
-    public static void SlotSetterPostfix(object __instance, object __0)
+    public static void GetSidPostfix(object __instance, ref string __result)
     {
         try
         {
-            var typeName   = __instance?.GetType().Name ?? "(static)";
-            var sid        = __0?.GetType().GetProperty("sid")?.GetValue(__0)?.ToString() ?? "null";
-            var methodName = new System.Diagnostics.StackFrame(1).GetMethod()?.Name ?? "?";
-            Log.LogInfo($"[SlotCall] {typeName}.{methodName} sid={sid}");
-
-            if (__instance != null)
-            {
-                var go = TryGetGameObject(__instance);
-                if (go != null)
-                {
-                    try
-                    {
-                        var gciMethod = go.GetType().GetMethods()
-                            .FirstOrDefault(x => x.Name == "GetComponentsInChildren" && x.IsGenericMethod && x.GetParameters().Length == 0);
-                        if (gciMethod != null)
-                        {
-                            Type tmpType = null;
-                            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                            {
-                                tmpType = asm.GetType("TMPro.TMP_Text") ?? asm.GetType("TMPro.TextMeshProUGUI");
-                                if (tmpType != null) break;
-                            }
-                            if (tmpType != null)
-                            {
-                                var comps = gciMethod.MakeGenericMethod(tmpType).Invoke(go, null) as System.Collections.IEnumerable;
-                                if (comps != null)
-                                    foreach (var comp in comps)
-                                    {
-                                        var name = comp.GetType().GetProperty("name")?.GetValue(comp)?.ToString() ?? "?";
-                                        var text = comp.GetType().GetProperty("text")?.GetValue(comp)?.ToString() ?? "?";
-                                        Log.LogInfo($"[SlotCall]   TMP '{name}' = \"{text}\"");
-                                    }
-                            }
-                        }
-                    }
-                    catch { }
-                }
-            }
+            if (__instance == null) return;
+            var ptr = IL2CPP.Il2CppObjectBaseToPtrNotNull((Il2CppSystem.Object)__instance);
+            if (TowerSlotPtrs.Contains(ptr))
+                __result = "tower";
         }
         catch { }
     }
 
-    static object TryGetGameObject(object instance)
+    // ── Localization patch ────────────────────────────────────────────────────
+    static readonly Dictionary<string, string> LocOverrides = new Dictionary<string, string>
     {
-        try { return instance.GetType().GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance)?.GetValue(instance); }
-        catch { return null; }
+        { "tower_name",   "Tower City" },
+        { "tower_desc",   "A city built around a great tower." },
+        { "tower_select", "Select Tower City" },
+    };
+
+    static void PatchLocalization()
+    {
+        try
+        {
+            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Hex");
+            if (hexAsm == null) { Log.LogWarning("[LocPatch] Hex assembly not found."); return; }
+
+            int patched = 0;
+            foreach (var type in hexAsm.GetTypes())
+            {
+                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                   BindingFlags.Instance | BindingFlags.Static))
+                {
+                    try
+                    {
+                        if (m.ReturnType != typeof(string)) continue;
+                        var parms = m.GetParameters();
+                        if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
+                        if (m.Name.StartsWith("set_")) continue;
+
+                        Harmony.Patch(m, postfix: new HarmonyMethod(typeof(Plugin), nameof(LocPostfix)));
+                        patched++;
+                    }
+                    catch { }
+                }
+            }
+            Log.LogInfo($"[LocPatch] Patched {patched} (string)->string method(s) in Hex.");
+        }
+        catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
+    }
+
+    public static void LocPostfix(string __0, ref string __result)
+    {
+        try
+        {
+            if (__0 != null && LocOverrides.TryGetValue(__0, out var val))
+            {
+                Log.LogInfo($"[LocPatch] Intercepted key '{__0}' → '{val}'");
+                __result = val;
+            }
+        }
+        catch { }
     }
 }
 
@@ -158,7 +144,6 @@ public static class ScLobby2_Init_Patch
     {
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
-        Plugin.DumpAndPatchSlotSetters();
     }
 }
 
@@ -199,16 +184,8 @@ public static class ScFractionSelect_qwa_Patch
                 IL2CPP.Il2CppObjectBaseToPtrNotNull(newArr));
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
-            var dictFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "dict_");
-            var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
-            if (dictObjPtr != IntPtr.Zero)
-            {
-                var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
-                Plugin.Log.LogInfo($"[TowerInject] dict_ has {dict.Count} entries, skipping tower key insert.");
-            }
-
             _injectedQwa = true;
-            Plugin.Log.LogInfo("[TowerInject] Injected tower slot (sid=human) into SoFractions.");
+            Plugin.Log.LogInfo($"[TowerInject] Injected tower slot (sid=tower) into SoFractions.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
@@ -220,7 +197,13 @@ public static class ScFractionSelect_qwa_Patch
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
-        slot.sid = "human";
+
+        // !! sid stays "human" at the managed level — get_sid patch overrides it
+        // when the ptr is in TowerSlotPtrs.
+        var slotPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(slot);
+        Plugin.TowerSlotPtrs.Add(slotPtr);
+        Plugin.Log.LogInfo($"[TowerInject] Tower slot ptr registered: 0x{slotPtr:X}");
+
         return slot;
     }
 }
@@ -245,7 +228,7 @@ public static class ScFractionSelect_qwb_Patch
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
             __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=human).");
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=tower via ptr patch).");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }

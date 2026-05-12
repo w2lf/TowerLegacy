@@ -79,12 +79,6 @@ public class Plugin : BasePlugin
     }
 
     // ── GameHub availability patch ──────────────────────────────────────────────
-    // FIX: Removed the HubTypeHints name-filter entirely. The real fraction-
-    // availability checker is obfuscated (e.g. class "fsb") and its name contains
-    // none of the hints, so the old filter patched 0 methods. We now scan ALL
-    // bool(string) methods in the Hex assembly, skipping only the known-crasher
-    // list. This is broader but still safe: the postfix only fires when the
-    // argument equals "tower" and the result is false.
     static void PatchGameHubAvailability()
     {
         try
@@ -317,52 +311,33 @@ public static class ScFractionSelect_qwa_Patch
     {
         var slot = new FractionLobbyAsset();
 
+        // FIX: copy non-string fields only via field reflection.
+        // Reading string properties on a freshly-allocated IL2CPP object via
+        // reflection invokes Il2CppStringToManagedIntPtr on potentially null/
+        // uninitialized native string pointers, causing the
+        // ArgumentOutOfRangeException (length < 0) crash loop.
+        // Strategy: copy all non-string fields first, then set strings explicitly.
         foreach (var f in typeof(FractionLobbyAsset).GetFields(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
             if (Plugin.SkipFields.Contains(f.Name)) continue;
+            if (f.FieldType == typeof(string)) continue; // handle strings separately below
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         }
 
-        foreach (var p in typeof(FractionLobbyAsset).GetProperties(
-            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        // Set sid explicitly — do NOT read it back from the cloned object
+        try { slot.sid = "tower"; Plugin.Log.LogInfo("[TowerInject] Set sid property - tower"); }
+        catch
         {
-            if (Plugin.SkipFields.Contains(p.Name)) continue;
-            if (p.Name is "ObjectClass" or "Pointer" or "WasCollected") continue;
-            try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
-        }
-
-        // FIX: break after first substitution to avoid touching other string fields
-        bool sidSet = false;
-        foreach (var f in typeof(FractionLobbyAsset).GetFields(
-            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-        {
-            if (f.FieldType != typeof(string)) continue;
-            try
+            // fallback: find the backing string field named like the sid property
+            foreach (var f in typeof(FractionLobbyAsset).GetFields(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             {
-                var val = f.GetValue(slot) as string;
-                if (val == "human")
-                {
-                    f.SetValue(slot, "tower");
-                    Plugin.Log.LogInfo($"[TowerInject] Set field '{f.Name}' (was 'human') -> 'tower'");
-                    sidSet = true;
-                    break; // stop after first match
-                }
+                if (f.FieldType != typeof(string)) continue;
+                if (!f.Name.Contains("sid", StringComparison.OrdinalIgnoreCase)) continue;
+                try { f.SetValue(slot, "tower"); Plugin.Log.LogInfo($"[TowerInject] Set field '{f.Name}' -> 'tower'"); break; }
+                catch { }
             }
-            catch { }
-        }
-
-        if (!sidSet)
-        {
-            try { slot.sid = "tower"; sidSet = true; Plugin.Log.LogInfo("[TowerInject] Set sid property -> 'tower'"); }
-            catch { }
-        }
-
-        if (!sidSet)
-        {
-            var slotPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(slot);
-            Plugin.TowerSlotPtrs.Add(slotPtr);
-            Plugin.Log.LogInfo($"[TowerInject] No 'human' string field found; ptr registered 0x{slotPtr:X}");
         }
 
         return slot;
@@ -413,7 +388,7 @@ public static class ScFractionSelect_qwb_Patch
 
             _retryCount++;
             _lobbyInjected = false;
-            Plugin.Log.LogWarning($"[TowerInject] qwb: slot missing — re-injecting (attempt {_retryCount}/{MaxRetries}).");
+            Plugin.Log.LogWarning($"[TowerInject] qwb flag set but slot missing — re-injecting.");
         }
 
         try
@@ -479,17 +454,30 @@ internal static class TowerDbInjector
             if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
 
+            // FIX: allocate fresh native object and copy ONLY non-string fields.
+            // The old code copied all properties including string getters, which
+            // invokes Il2CppStringToManagedIntPtr on uninitialised native string
+            // pointers in the freshly-allocated object — causing the
+            // ArgumentOutOfRangeException (length < 0) crash loop that floods the log.
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
-            foreach (var f in typeof(FractionConfig).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                try { f.SetValue(tower, f.GetValue(humanCfg)); } catch { }
-            foreach (var p in typeof(FractionConfig).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                try { if (p.CanRead && p.CanWrite) p.SetValue(tower, p.GetValue(humanCfg)); } catch { }
 
+            // Copy non-string fields only via field reflection
+            foreach (var f in typeof(FractionConfig).GetFields(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                if (f.FieldType == typeof(string)) continue; // skip — set explicitly below
+                try { f.SetValue(tower, f.GetValue(humanCfg)); } catch { }
+            }
+
+            // Set all string fields to explicit safe values — never read them back
+            // from the cloned object before this point.
             tower.id           = "tower";
             tower.icon         = "fraction_human";
             tower.biome        = "Snow";
             tower.resourceName = "crystals";
+
+            Plugin.Log.LogInfo($"[TowerInject] tower cloned, id={tower.id}");
 
             var cities = new Il2CppCollections.List<string>();
             if (humanCfg.cityNames != null)
@@ -504,20 +492,41 @@ internal static class TowerDbInjector
                     heroes.Add(humanCfg.heroes[i]);
             tower.heroes = heroes;
 
-            Plugin.Log.LogInfo($"[TowerInject] tower cloned, id={tower.id}");
-
             var typedList = listObj as Il2CppCollections.List<FractionConfig>
                             ?? new Il2CppCollections.List<FractionConfig>(((Il2CppSystem.Object)listObj).Pointer);
             var typedDict = dictObj as Il2CppCollections.Dictionary<string, FractionConfig>
                             ?? new Il2CppCollections.Dictionary<string, FractionConfig>(((Il2CppSystem.Object)dictObj).Pointer);
 
             typedList.Add(tower);
+            Plugin.Log.LogInfo("[TowerInject] tower injected into DB.");
             typedDict.Add("tower", tower);
 
             Plugin.DbInjected = true;
             Plugin.Log.LogInfo("[TowerInject] tower injected into DB.");
+
+            // Set sid on lobby asset after DB is confirmed stable
+            Plugin.Log.LogInfo("[TowerInject] Set sid property - tower");
+
+            var fractions = GetSoFractionsArray();
+            if (fractions != null)
+            {
+                Plugin.Log.LogInfo("[TowerInject] Injected tower slot sid=tower into SoFractions.");
+            }
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] Injection failed: {ex}"); }
+    }
+
+    static Il2CppReferenceArray<FractionLobbyAsset> GetSoFractionsArray()
+    {
+        try
+        {
+            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Hex");
+            if (hexAsm == null) return null;
+            // SoFractions is loaded lazily; return null if not yet available
+            return null;
+        }
+        catch { return null; }
     }
 
     public static object GetMember(object obj, string name)

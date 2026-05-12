@@ -3,7 +3,7 @@
 	[
 		{
 			"id": "tower",
-			"name": "unfrozen_name",
+			"name": "tower_name",
 			"desc": "unfrozen_desc",
 			"narrativeDesc": "unfrozen_narrative_desc",
 			"icon": "fraction_unfrozen",

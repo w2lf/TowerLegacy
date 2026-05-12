@@ -38,6 +38,9 @@ public class Plugin : BasePlugin
     internal static Harmony Harmony;
     internal static bool DbInjected;
 
+    // The display name used everywhere as a hard fallback
+    internal const string TowerDisplayName = "Tower City";
+
     public override void Load()
     {
         Log = base.Log;
@@ -94,13 +97,14 @@ public static class ScFractionSelect_qwb_Patch
     }
 }
 
-// Safety-net name overrides
+// Hard override: if the game resolves the name field through any property,
+// intercept and return our display name directly.
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {
     public static void Postfix(FractionConfig __instance, ref string __result)
     {
-        try { if (__instance?.id == "tower") __result = "Tower City"; }
+        try { if (__instance?.id == "tower") __result = Plugin.TowerDisplayName; }
         catch { }
     }
 }
@@ -110,7 +114,7 @@ public static class FractionConfig_get_name_Patch
 {
     public static void Postfix(FractionConfig __instance, ref string __result)
     {
-        try { if (__instance?.id == "tower") __result = "Tower City"; }
+        try { if (__instance?.id == "tower") __result = Plugin.TowerDisplayName; }
         catch { }
     }
 }
@@ -144,8 +148,8 @@ internal static class TowerDbInjector
 
             Plugin.Log.LogInfo($"[TowerInject] JSON loaded: id={data.id} name={data.name}");
 
-            // 2. Inject localization entry
-            TryInjectLocKey(data.name, "Tower City");
+            // 2. Inject localization entry (best-effort, Harmony patch is the real fallback)
+            TryInjectLocKey(data.name, Plugin.TowerDisplayName);
 
             // 3. Find DB collections
             var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
@@ -181,8 +185,10 @@ internal static class TowerDbInjector
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
 
+            // Store the display name directly — no loc key needed since
+            // the Harmony get_Name patch will always override to TowerDisplayName.
             tower.id            = data.id;
-            tower.name          = data.name;
+            tower.name          = Plugin.TowerDisplayName;  // "Tower City" stored directly
             tower.desc          = data.desc;
             tower.narrativeDesc = data.narrativeDesc;
 
@@ -235,7 +241,7 @@ internal static class TowerDbInjector
                 }
             }
 
-            Plugin.Log.LogWarning($"[TowerInject] Could not find loc table for '{key}'.");
+            Plugin.Log.LogWarning($"[TowerInject] Could not find loc table for '{key}' (Harmony patch handles display name).");
         }
         catch (Exception ex) { Plugin.Log.LogWarning($"[TowerInject] TryInjectLocKey failed: {ex.Message}"); }
     }

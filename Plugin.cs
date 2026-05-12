@@ -11,6 +11,7 @@ using Hex.GameHub.Lobby.UI;
 using Hex.GameHub.UICommon;
 using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
+using UnityEngine.SceneManagement;
 using Il2CppCollections = Il2CppSystem.Collections.Generic;
 
 namespace System.Runtime.CompilerServices
@@ -48,50 +49,29 @@ public class Plugin : BasePlugin
         Log.LogInfo("TowerLegacy loaded.");
     }
 
-    // ── Early DB injection: hook the method that fires when Config db is loaded ──
+    // ── Early DB injection ──────────────────────────────────────────────────────
+    // cjv.set_bxjy is a field accessor — IL2CPP field accessors cannot be
+    // Harmony-patched (they have no managed trampoline). We use SceneManager
+    // .sceneLoaded instead, which fires after every scene load and is always safe.
     static void PatchEarlyDbTrigger()
     {
         try
         {
-            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
-                .FirstOrDefault(a => a.GetName().Name == "Hex");
-            if (hexAsm == null) { Log.LogWarning("[EarlyInject] Hex assembly not found."); return; }
-
-            var cjvType = hexAsm.GetType("cjv");
-            if (cjvType == null) { Log.LogWarning("[EarlyInject] cjv type not found."); return; }
-
-            var setter = cjvType.GetMethod("set_bxjy",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-            if (setter == null)
-            {
-                var prop = cjvType.GetProperty("bxjy",
-                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                if (prop != null) setter = prop.GetSetMethod(true);
-            }
-
-            if (setter != null)
-            {
-                Harmony.Patch(setter,
-                    postfix: new HarmonyMethod(typeof(Plugin), nameof(OnDbRepoSet)));
-                Log.LogInfo("[EarlyInject] Patched cjv.set_bxjy — will inject tower when DB repo is assigned.");
-            }
-            else
-            {
-                Log.LogWarning("[EarlyInject] cjv.set_bxjy not found — falling back to ScLobby2.Init trigger.");
-            }
+            SceneManager.sceneLoaded += (Action<Scene, LoadSceneMode>)OnSceneLoaded;
+            Log.LogInfo("[EarlyInject] Registered SceneManager.sceneLoaded — will inject tower on scene load.");
         }
         catch (Exception ex) { Log.LogWarning($"[EarlyInject] {ex.Message}"); }
     }
 
-    public static void OnDbRepoSet()
+    static void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
         try
         {
             if (DbInjected) return;
-            Log.LogInfo("[EarlyInject] cjv.bxjy assigned — triggering early DB injection.");
+            Log.LogInfo($"[EarlyInject] Scene '{scene.name}' loaded — attempting DB injection.");
             TowerDbInjector.TryInject();
         }
-        catch (Exception ex) { Log.LogError($"[EarlyInject] OnDbRepoSet failed: {ex}"); }
+        catch (Exception ex) { Log.LogError($"[EarlyInject] OnSceneLoaded failed: {ex}"); }
     }
 
     // ── GameHub availability patch ──────────────────────────────────────────────
@@ -123,7 +103,6 @@ public class Plugin : BasePlugin
                 if (patched >= MaxPatches) break;
 
                 // Skip any type whose declaring namespace is a Unity engine namespace.
-                // These are re-exposed wrappers and patching them causes the warning spam.
                 var ns = type.Namespace ?? "";
                 if (ns.StartsWith("UnityEngine", StringComparison.Ordinal) ||
                     ns.StartsWith("Unity.",      StringComparison.Ordinal)  ||
@@ -141,8 +120,7 @@ public class Plugin : BasePlugin
                         if (m.ReturnType != typeof(bool)) continue;
                         if (skipByName.Contains(m.Name)) continue;
 
-                        // Also skip if the method's declaring type is a Unity engine type —
-                        // inherited methods show the declaring type, not the subclass.
+                        // Also skip if the method's declaring type is a Unity engine type.
                         var declNs = m.DeclaringType?.Namespace ?? "";
                         if (declNs.StartsWith("UnityEngine", StringComparison.Ordinal) ||
                             declNs.StartsWith("Unity.",      StringComparison.Ordinal))
@@ -164,16 +142,20 @@ public class Plugin : BasePlugin
     }
 
     // Postfix: if the method returned false and the argument is "tower", flip to true.
-    public static void FractionAvailablePostfix(string __0, ref bool __result)
+    // __instance may be null for static methods or uninitialized IL2CPP objects —
+    // the null guard prevents the trampoline NullReferenceException seen in the log.
+    public static void FractionAvailablePostfix(object __instance, string __0, ref bool __result)
     {
         try
         {
+            if (__instance == null && !(__instance is null)) return; // skip uninitialised Il2Cpp objects
             if (!__result && __0 == "tower")
             {
                 __result = true;
                 Plugin.Log.LogInfo("[HubPatch] Overrode availability check: tower -> true");
             }
         }
+        catch (NullReferenceException) { /* uninitialised IL2CPP object — silently skip */ }
         catch { }
     }
 

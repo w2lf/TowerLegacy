@@ -60,6 +60,61 @@ public static class ScLobby2_Init_Patch
     }
 }
 
+// Patch qwa (PREFIX) so our slot is in the list BEFORE qwa builds UI components.
+// qwb just returns the list; qwa iterates it and spawns the actual slot GameObjects.
+[HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwa))]
+public static class ScFractionSelect_qwa_Patch
+{
+    public static void Prefix(ScFractionSelect __instance)
+    {
+        try
+        {
+            // fractionsAssets is a SoFractions ScriptableObject that holds the
+            // authoritative list of FractionLobbyAsset. We inject into that list
+            // before qwa reads it, so the spawning loop includes our slot.
+            var assets = __instance?.fractionsAssets;
+            if (assets == null) { Plugin.Log.LogWarning("[TowerInject] fractionsAssets is null in qwa prefix."); return; }
+
+            // Get the inner list from SoFractions via reflection (obfuscated field name).
+            var listObj = TowerDbInjector.GetMemberPublic(assets, "fractions")
+                       ?? TowerDbInjector.GetFirstListField<FractionLobbyAsset>(assets);
+
+            if (listObj == null) { Plugin.Log.LogWarning("[TowerInject] Could not find fractions list on SoFractions."); return; }
+
+            var list = listObj as Il2CppCollections.List<FractionLobbyAsset>
+                       ?? new Il2CppCollections.List<FractionLobbyAsset>(
+                           ((Il2CppSystem.Object)listObj).Pointer);
+
+            // Already injected?
+            for (int i = 0; i < list.Count; i++)
+                if (list[i]?.sid == "tower") return;
+
+            // Find human slot as sprite source.
+            FractionLobbyAsset src = null;
+            for (int i = 0; i < list.Count; i++)
+                if (list[i]?.sid == "human") { src = list[i]; break; }
+
+            if (src == null) { Plugin.Log.LogWarning("[TowerInject] human UI slot not found in SoFractions."); return; }
+
+            var slot = new FractionLobbyAsset
+            {
+                sid          = "tower",
+                icon         = src.icon,
+                slotFon      = src.slotFon,
+                statisticFon = src.statisticFon,
+                versusFon    = src.versusFon,
+                bigIcon      = src.bigIcon,
+                card         = src.card
+            };
+
+            list.Add(slot);
+            Plugin.Log.LogInfo("[TowerInject] Injected tower slot into SoFractions before qwa.");
+        }
+        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
+    }
+}
+
+// Keep qwb patch as fallback in case fractionsAssets path fails.
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {
@@ -76,7 +131,7 @@ public static class ScFractionSelect_qwb_Patch
             for (int i = 0; i < __result.Count; i++)
                 if (__result[i]?.sid == "human") { src = __result[i]; break; }
 
-            if (src == null) { Plugin.Log.LogWarning("[TowerInject] human UI slot not found."); return; }
+            if (src == null) { Plugin.Log.LogWarning("[TowerInject] human UI slot not found (qwb fallback)."); return; }
 
             var slot = new FractionLobbyAsset
             {
@@ -90,9 +145,9 @@ public static class ScFractionSelect_qwb_Patch
             };
 
             __result.Add(slot);
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot: tower");
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb fallback.");
         }
-        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] UI injection failed: {ex}"); }
+        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb fallback failed: {ex}"); }
     }
 }
 
@@ -162,7 +217,6 @@ internal static class TowerDbInjector
             if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
 
-            // 1. Find human as the base
             var humanRaw = FindByIdInList(listObj, "human");
             if (humanRaw == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
 
@@ -171,21 +225,18 @@ internal static class TowerDbInjector
 
             Plugin.Log.LogInfo($"[TowerInject] human ok, id={human.id}");
 
-            // 2. Allocate new config and copy ALL fields from human first
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
 
             CopyAllFields(human, tower);
 
-            // 3. Override only what tower.json specifies
             tower.id            = data.id;
-            tower.name          = "";               // empty prevents "Loc:..." display
+            tower.name          = "";
             tower.desc          = data.desc;
             tower.narrativeDesc = data.narrativeDesc;
 
             Plugin.Log.LogInfo($"[TowerInject] tower created, id={tower.id}");
 
-            // 4. Add to collections
             var typedList = listObj as Il2CppCollections.List<FractionConfig>
                             ?? new Il2CppCollections.List<FractionConfig>(
                                 ((Il2CppSystem.Object)listObj).Pointer);
@@ -205,29 +256,47 @@ internal static class TowerDbInjector
         }
     }
 
-    // Copy every public field and readable/writable property from src to dst.
-    // This ensures no null arrays or missing references on the new config.
     static void CopyAllFields(FractionConfig src, FractionConfig dst)
     {
         var type = typeof(FractionConfig);
-
         foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
-            try { field.SetValue(dst, field.GetValue(src)); }
-            catch { }
+            try { field.SetValue(dst, field.GetValue(src)); } catch { }
         }
-
         foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
         {
-            try
-            {
-                if (prop.CanRead && prop.CanWrite)
-                    prop.SetValue(dst, prop.GetValue(src));
-            }
-            catch { }
+            try { if (prop.CanRead && prop.CanWrite) prop.SetValue(dst, prop.GetValue(src)); } catch { }
         }
-
         Plugin.Log.LogInfo("[TowerInject] CopyAllFields complete.");
+    }
+
+    // Used by qwa prefix to find the fractions list on SoFractions by common name.
+    public static object GetMemberPublic(object obj, string name)
+    {
+        try { return GetMember(obj, name); } catch { return null; }
+    }
+
+    // Fallback: find the first List<FractionLobbyAsset> field on the object.
+    public static object GetFirstListField<T>(object obj) where T : Il2CppSystem.Object
+    {
+        try
+        {
+            var t = obj.GetType();
+            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                var val = f.GetValue(obj);
+                if (val == null) continue;
+                try
+                {
+                    var list = val as Il2CppCollections.List<T>
+                               ?? new Il2CppCollections.List<T>(((Il2CppSystem.Object)val).Pointer);
+                    if (list.Count > 0) return list;
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
     }
 
     public static string GetIdSafe(object cfg)
@@ -245,7 +314,7 @@ internal static class TowerDbInjector
         return null;
     }
 
-    static object GetMember(object obj, string name)
+    public static object GetMember(object obj, string name)
     {
         var t = obj.GetType();
         var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);

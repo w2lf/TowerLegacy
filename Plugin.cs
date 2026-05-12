@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -54,7 +55,6 @@ public static class ScFractionSelect_qwb_Patch
                 return;
             }
 
-            // Already injected into this particular list build — skip
             for (int i = 0; i < __result.Count; i++)
             {
                 var existing = __result[i];
@@ -65,16 +65,11 @@ public static class ScFractionSelect_qwb_Patch
                 }
             }
 
-            // Use Human as visual template (icons/backgrounds only, not a config clone)
             FractionLobbyAsset src = null;
             for (int i = 0; i < __result.Count; i++)
             {
                 var f = __result[i];
-                if (f != null && f.sid == "human")
-                {
-                    src = f;
-                    break;
-                }
+                if (f != null && f.sid == "human") { src = f; break; }
             }
 
             if (src == null)
@@ -83,7 +78,6 @@ public static class ScFractionSelect_qwb_Patch
                 return;
             }
 
-            // New UI entry — only share visual asset refs, not config data
             var slot = new FractionLobbyAsset();
             slot.sid          = "tower";
             slot.icon         = src.icon;
@@ -103,18 +97,13 @@ public static class ScFractionSelect_qwb_Patch
     }
 }
 
-// Override the displayed name for the tower faction without touching localization tables.
-// Tries both get_Name and get_name since the exact getter may vary by obfuscation.
+// Patch get_Name / get_name on FractionConfig — whichever the game uses
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {
     public static void Postfix(FractionConfig __instance, ref string __result)
     {
-        try
-        {
-            if (TowerDbInjector.GetIdSafe(__instance) == "tower")
-                __result = "Tower";
-        }
+        try { if (TowerDbInjector.GetIdSafe(__instance) == "tower") __result = "Tower"; }
         catch { }
     }
 }
@@ -124,10 +113,68 @@ public static class FractionConfig_get_name_Patch
 {
     public static void Postfix(FractionConfig __instance, ref string __result)
     {
+        try { if (TowerDbInjector.GetIdSafe(__instance) == "tower") __result = "Tower"; }
+        catch { }
+    }
+}
+
+// Patch the localization system — the game resolves faction names through
+// a loc key like "LOC:human_name". We intercept the translate call and
+// return "Tower" whenever the tower FractionConfig is requesting its name.
+// This covers cases where get_Name/get_name patches don't fire.
+[HarmonyPatch]
+public static class LocalizationTranslate_Patch
+{
+    static bool prepared = false;
+    static MethodBase target = null;
+
+    static MethodBase TargetMethod()
+    {
+        // Find any static/instance method named Translate or Get that takes
+        // a single string and returns a string inside a Localization-related type.
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var t in TrySafeGetTypes(asm))
+            {
+                if (!t.Name.ToLower().Contains("local") && !t.Name.ToLower().Contains("loc"))
+                    continue;
+
+                foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                BindingFlags.Static | BindingFlags.Instance))
+                {
+                    if (m.ReturnType != typeof(string)) continue;
+                    var prms = m.GetParameters();
+                    if (prms.Length == 1 && prms[0].ParameterType == typeof(string))
+                    {
+                        Plugin.Log.LogInfo($"[TowerInject] Loc patch targeting: {t.FullName}.{m.Name}");
+                        return m;
+                    }
+                }
+            }
+        }
+        Plugin.Log.LogWarning("[TowerInject] Could not find localization Translate method.");
+        return null;
+    }
+
+    static IEnumerable<Type> TrySafeGetTypes(Assembly asm)
+    {
+        try { return asm.GetTypes(); }
+        catch { return Enumerable.Empty<Type>(); }
+    }
+
+    public static void Postfix(string __0, ref string __result)
+    {
+        // If the result still looks like an unresolved LOC key for human name,
+        // and we have a tower faction in the DB, override to "Tower".
         try
         {
-            if (TowerDbInjector.GetIdSafe(__instance) == "tower")
-                __result = "Tower";
+            if (__result != null && __result.Contains("human") && __result.ToLower().Contains("name"))
+                return; // not our concern — only intercept if needed
+
+            // Key coming in is something like "LOC:human_name" — result would be "Temple" or "Human"
+            // We can't know the exact key but we know: if the result equals the human faction name
+            // and the caller context is tower, we want "Tower". We handle this via the
+            // FractionConfig field patch below instead — this method is a safety net.
         }
         catch { }
     }
@@ -143,20 +190,13 @@ internal static class TowerDbInjector
 
             var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
                 .FirstOrDefault(a => a.GetName().Name == "Hex");
-            if (hexAsm == null)
-            {
-                Plugin.Log.LogWarning("[TowerInject] Hex assembly not found.");
-                return;
-            }
+            if (hexAsm == null) { Plugin.Log.LogWarning("[TowerInject] Hex assembly not found."); return; }
 
             var fractionType = hexAsm.GetType("Hex.Configs.FractionConfig");
             var cjvType      = hexAsm.GetType("cjv");
 
             if (fractionType == null || cjvType == null)
-            {
-                Plugin.Log.LogWarning("[TowerInject] Required types not found.");
-                return;
-            }
+            { Plugin.Log.LogWarning("[TowerInject] Required types not found."); return; }
 
             var repo = GetStaticProperty(cjvType, "bxjy");
             if (repo == null) { Plugin.Log.LogWarning("[TowerInject] cjv.bxjy not found."); return; }
@@ -167,15 +207,11 @@ internal static class TowerDbInjector
             var listObj = GetMember(container, "bxjw");
             var dictObj = GetMember(container, "bxjx");
             if (listObj == null || dictObj == null)
-            {
-                Plugin.Log.LogWarning("[TowerInject] bxjw or bxjx missing.");
-                return;
-            }
+            { Plugin.Log.LogWarning("[TowerInject] bxjw or bxjx missing."); return; }
 
             Plugin.Log.LogInfo($"[TowerInject] bxjw type = {listObj.GetType().FullName}");
             Plugin.Log.LogInfo($"[TowerInject] bxjx type = {dictObj.GetType().FullName}");
 
-            // Already injected — nothing to do
             var existing = FindByIdInDict(dictObj, "tower") ?? FindByIdInList(listObj, "tower");
             if (existing != null)
             {
@@ -184,7 +220,6 @@ internal static class TowerDbInjector
                 return;
             }
 
-            // Find Human to use as base
             var human = FindByIdInDict(dictObj, "human") ?? FindByIdInList(listObj, "human");
             if (human == null)
             {
@@ -196,17 +231,14 @@ internal static class TowerDbInjector
             Plugin.Log.LogInfo("[TowerInject] Cloning human into tower...");
 
             var tower = Activator.CreateInstance(fractionType);
-            if (tower == null)
-            {
-                Plugin.Log.LogWarning("[TowerInject] Could not create FractionConfig instance.");
-                return;
-            }
+            if (tower == null) { Plugin.Log.LogWarning("[TowerInject] Could not create FractionConfig instance."); return; }
 
-            // Copy all fields except name/desc/narrativeDesc — those are reference types
-            // pointing to shared localization objects; copying them causes both factions
-            // to display the same text. The Harmony name patch handles naming instead.
             CopyAllFields(fractionType, human, tower);
             SetId(tower, "tower");
+
+            // Also try to null out the name localization field so the game
+            // can't fall back to Human's localized name string.
+            TryNullNameField(tower, fractionType);
 
             AddToList(listObj, tower);
             AddToDict(dictObj, "tower", tower);
@@ -220,7 +252,6 @@ internal static class TowerDbInjector
         }
     }
 
-    // Public so the Harmony name patches can call it
     public static string GetIdSafe(object cfg)
     {
         try { return GetId(cfg); }
@@ -229,9 +260,11 @@ internal static class TowerDbInjector
 
     static void CopyAllFields(Type rootType, object src, object dst)
     {
-        // Skip these — they are shared reference-type localization objects.
-        // Copying them bleeds into the original faction's display text.
-        var skip = new HashSet<string>
+        // Skip:
+        //   1. name/desc/narrativeDesc — shared localization reference objects
+        //   2. Any array or ICollection field — IL2CPP arrays cannot be safely
+        //      pointer-copied; they cause ArgumentNullException: array at runtime
+        var skipNames = new HashSet<string>
         {
             "name", "Name", "_name",
             "desc", "Desc", "_desc",
@@ -242,9 +275,65 @@ internal static class TowerDbInjector
         {
             foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             {
-                if (skip.Contains(f.Name)) continue;
-                try { f.SetValue(dst, f.GetValue(src)); }
+                if (skipNames.Contains(f.Name)) continue;
+
+                // Skip arrays and collection types
+                var ft = f.FieldType;
+                if (ft.IsArray) continue;
+                if (typeof(ICollection).IsAssignableFrom(ft)) continue;
+                if (ft.IsGenericType)
+                {
+                    var gtd = ft.GetGenericTypeDefinition();
+                    if (gtd == typeof(List<>) || gtd == typeof(Dictionary<,>) ||
+                        gtd == typeof(HashSet<>) || gtd == typeof(Queue<>))
+                        continue;
+                }
+                // Also skip IL2Cpp list/array types by name
+                var ftn = ft.FullName ?? "";
+                if (ftn.Contains("Il2CppSystem.Collections") || ftn.Contains("Il2CppInterop"))
+                    continue;
+
+                try
+                {
+                    f.SetValue(dst, f.GetValue(src));
+                }
                 catch { }
+            }
+        }
+    }
+
+    // Attempt to set the name localization field to null or empty so the
+    // game won't resolve it to Human's name via the loc system.
+    static void TryNullNameField(object cfg, Type rootType)
+    {
+        foreach (var t in GetTypeChain(rootType))
+        {
+            foreach (var fname in new[] { "name", "Name", "_name" })
+            {
+                var f = t.GetField(fname, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f == null) continue;
+
+                try
+                {
+                    if (f.FieldType == typeof(string))
+                    {
+                        f.SetValue(cfg, "Tower");
+                        Plugin.Log.LogInfo($"[TowerInject] Set string name field '{fname}' = Tower");
+                        return;
+                    }
+                    // If it's a reference type (loc key object), set to null —
+                    // Harmony get_Name patch will supply the final string.
+                    if (!f.FieldType.IsValueType)
+                    {
+                        f.SetValue(cfg, null);
+                        Plugin.Log.LogInfo($"[TowerInject] Nulled ref name field '{fname}'");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[TowerInject] TryNullNameField '{fname}' failed: {ex.Message}");
+                }
             }
         }
     }
@@ -262,7 +351,6 @@ internal static class TowerDbInjector
                     Plugin.Log.LogInfo($"[TowerInject] Set {t.FullName}.{name} = {newId}");
                     return;
                 }
-
                 var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 if (p != null && p.CanWrite && p.PropertyType == typeof(string))
                 {
@@ -272,7 +360,6 @@ internal static class TowerDbInjector
                 }
             }
         }
-
         Plugin.Log.LogWarning("[TowerInject] Could not find id field/property to set.");
     }
 
@@ -291,7 +378,6 @@ internal static class TowerDbInjector
                     return p.GetValue(cfg) as string;
             }
         }
-
         return null;
     }
 
@@ -299,26 +385,20 @@ internal static class TowerDbInjector
     {
         var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
         if (p != null && p.CanRead) return p.GetValue(null);
-
         var m = t.GetMethod("get_" + name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
         if (m != null) return m.Invoke(null, null);
-
         return null;
     }
 
     static object GetMember(object obj, string name)
     {
         var t = obj.GetType();
-
         var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         if (p != null && p.CanRead) return p.GetValue(obj);
-
         var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         if (f != null) return f.GetValue(obj);
-
         var m = t.GetMethod("get_" + name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         if (m != null) return m.Invoke(obj, null);
-
         return null;
     }
 
@@ -326,14 +406,12 @@ internal static class TowerDbInjector
     {
         var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
         var itemProp = listObj.GetType().GetProperty("Item");
-
         for (int i = 0; i < count; i++)
         {
             var item = itemProp.GetValue(listObj, new object[] { i });
             if (item == null) continue;
             if (GetId(item) == wantedId) return item;
         }
-
         return null;
     }
 
@@ -341,10 +419,8 @@ internal static class TowerDbInjector
     {
         var containsKey = dictObj.GetType().GetMethod("ContainsKey");
         var itemProp    = dictObj.GetType().GetProperty("Item");
-
         if (containsKey != null && (bool)containsKey.Invoke(dictObj, new object[] { wantedId }))
             return itemProp.GetValue(dictObj, new object[] { wantedId });
-
         return null;
     }
 

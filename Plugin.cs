@@ -106,13 +106,6 @@ public class Plugin : BasePlugin
         { "tower_select", "Select Tower City" },
     };
 
-    // Patch the staticTrue (string)->string methods identified from LocDump:
-    // io.hlt, io.jza, io.mrc, io.bpm, io.ela, lh.Generate, lh.hzd, lh.fav, lh.mjy,
-    // zr.heb, zr.dsw, zr.kbs, zr.kbt, zr.nme, zr.uc, zr.jxc, zr.kbp,
-    // bbj.cng, bbj.kgm, bbp.erg, bbp.fgs, bbp.ltb, bbp.kgx, bbp.giq,
-    // bbw.khu, bbw.iqu, bbw.hcv, bbw.fvo, bbw.kht, bbw.eof, bbw.lon, bbw.krl, bbw.kcf, bbw.bne,
-    // ccu.prx, cjt.rsb, cjt.neg, cjt.ivg, cjt.krb, cjt.kq, enz.bfkm,
-    // dk.gno, dk.mud, qc.iyf, qc.byo, qc.keo, qc.gfg, qc.iyt
     static readonly string[] LocTypeNames = {
         "io", "lh", "zr", "bbj", "bbp", "bbw", "ccu", "cjt", "enz",
         "dk", "qc", "di"
@@ -290,44 +283,29 @@ public static class ScFractionSelect_qwa_Patch
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {
-    // Simple bool flag — IL2Cpp List<T> pointers change between calls so a
-    // pointer-keyed HashSet never deduplicates correctly.
     internal static bool _lobbyInjected = false;
 
     public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
     {
-        // Guard 0 (FIRST): null/empty list — fires before assets are ready, or on
-        // a re-entry where the game passes a fresh null list. Must be checked before
-        // anything else to prevent NullReferenceException inside the guard branches.
+        // Guard 0: null/empty — premature call before assets are ready.
         if (__result == null || __result.Count == 0)
         {
             Plugin.Log.LogWarning("[TowerInject] qwb: result null or empty — skipping premature call.");
             return;
         }
 
-        // Guard 1: DB must be fully loaded before we touch lobby assets.
+        // Guard 1: DB must be injected first.
         if (!Plugin.DbInjected) return;
 
-        // Guard 2: only inject once per lobby open (reset by ScLobby2.Init postfix).
-        // Check whether our slot is already present rather than relying solely on
-        // the bool flag, in case the list was rebuilt between calls.
+        // Guard 2: already injected this lobby session — verify slot is still present.
         if (_lobbyInjected)
         {
             bool found = false;
-            try
-            {
-                for (int i = 0; i < __result.Count; i++)
-                    if (__result[i]?.sid == "tower") { found = true; break; }
-            }
-            catch { /* list may be partially constructed; treat as not-found */ }
+            try { for (int i = 0; i < __result.Count; i++) if (__result[i]?.sid == "tower") { found = true; break; } }
+            catch { }
 
-            if (found)
-            {
-                Plugin.Log.LogInfo("[TowerInject] qwb: lobby already injected, skipping.");
-                return;
-            }
+            if (found) { Plugin.Log.LogInfo("[TowerInject] qwb: already injected, skipping."); return; }
 
-            // Flag was set but slot is gone (list was rebuilt) — fall through to re-inject.
             Plugin.Log.LogInfo("[TowerInject] qwb: flag set but slot missing — re-injecting.");
             _lobbyInjected = false;
         }
@@ -341,21 +319,17 @@ public static class ScFractionSelect_qwb_Patch
 
             var newSlot = ScFractionSelect_qwa_Patch.BuildSlot(src);
 
-            // Rebuild the list's internal backing array via Il2CppReferenceArray
-            // to avoid ArgumentNullException from IL2CPP array internals after Add().
-            int oldCount = __result.Count;
-            var newArr = new Il2CppReferenceArray<FractionLobbyAsset>(oldCount + 1);
-            for (int i = 0; i < oldCount; i++)
-                newArr[i] = __result[i];
-            newArr[oldCount] = newSlot;
-
-            // Clear and re-populate the list from the safe array copy.
-            __result.Clear();
-            for (int i = 0; i < newArr.Length; i++)
-                __result.Add(newArr[i]);
+            // Option B: build a brand-new Il2Cpp List and assign it back via ref.
+            // This avoids mutating the existing list's internal backing array,
+            // which is the root cause of the ArgumentNullException on Add().
+            var freshList = new Il2CppSystem.Collections.Generic.List<FractionLobbyAsset>();
+            for (int i = 0; i < __result.Count; i++)
+                freshList.Add(__result[i]);
+            freshList.Add(newSlot);
+            __result = freshList;
 
             _lobbyInjected = true;
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (array-rebuild path).");
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (fresh-list path).");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }

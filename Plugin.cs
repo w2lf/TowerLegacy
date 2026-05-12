@@ -36,21 +36,9 @@ public class Plugin : BasePlugin
         { "pooledPtr", "isWrapped" };
 
     // Methods known to crash when patched via HarmonyX on IL2CPP trampolines.
-    // Add any obfuscated name that shows up in a DMD crash to this list.
     static readonly HashSet<string> SkipMethodNames = new HashSet<string>(StringComparer.Ordinal)
     {
-        "IsInvoking", "CompareTag",
-        // gla crashes with NullReferenceException inside its IL2CPP-to-managed
-        // trampoline (DMDdaglada) — the object is not initialised when it fires.
-        "gla"
-    };
-
-    // Type name substrings that are strong signals for the fraction-availability
-    // check. We patch ONLY types whose name contains one of these, which reduces
-    // the patch surface from 50 random methods down to a handful.
-    static readonly string[] HubTypeHints =
-    {
-        "GameHub", "GameMode", "Lobby", "Fraction", "Hub", "Matchmak"
+        "IsInvoking", "CompareTag", "gla"
     };
 
     public override void Load()
@@ -63,7 +51,7 @@ public class Plugin : BasePlugin
 
         DumpFractionLobbyAssetFields();
         DumpLocMethods();
-        DumpHubAvailabilityMethods(); // probe: logs candidates so we can identify the exact type next run
+        DumpHubAvailabilityMethods();
 
         Log.LogInfo("TowerLegacy loaded.");
     }
@@ -91,9 +79,12 @@ public class Plugin : BasePlugin
     }
 
     // ── GameHub availability patch ──────────────────────────────────────────────
-    // Strategy: patch ONLY bool(string) methods on types whose name hints at
-    // GameHub / lobby / fraction logic. This avoids patching deep-engine methods
-    // like gla (on some unrelated type) whose IL2CPP trampolines crash on invoke.
+    // FIX: Removed the HubTypeHints name-filter entirely. The real fraction-
+    // availability checker is obfuscated (e.g. class "fsb") and its name contains
+    // none of the hints, so the old filter patched 0 methods. We now scan ALL
+    // bool(string) methods in the Hex assembly, skipping only the known-crasher
+    // list. This is broader but still safe: the postfix only fires when the
+    // argument equals "tower" and the result is false.
     static void PatchGameHubAvailability()
     {
         try
@@ -108,18 +99,11 @@ public class Plugin : BasePlugin
             foreach (var type in hexAsm.GetTypes())
             {
                 var ns = type.Namespace ?? "";
-                // Skip Unity namespaces entirely.
                 if (ns.StartsWith("UnityEngine", StringComparison.Ordinal) ||
                     ns.StartsWith("Unity.",       StringComparison.Ordinal) ||
                     ns.StartsWith("TMPro",        StringComparison.Ordinal) ||
                     ns.StartsWith("UnityExplorer", StringComparison.Ordinal))
                     continue;
-
-                // Only consider types that look like hub/lobby/fraction logic.
-                var typeName = type.Name ?? "";
-                bool isHubType = HubTypeHints.Any(h =>
-                    typeName.IndexOf(h, StringComparison.OrdinalIgnoreCase) >= 0);
-                if (!isHubType) continue;
 
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                    BindingFlags.Instance | BindingFlags.Static))
@@ -164,7 +148,7 @@ public class Plugin : BasePlugin
         catch { }
     }
 
-    // ── Probe: dump all bool(string) candidates so we can identify the exact one ─
+    // ── Probe: dump all bool(string) candidates ─────────────────────────────────
     static void DumpHubAvailabilityMethods()
     {
         try
@@ -280,6 +264,7 @@ public static class ScLobby2_Init_Patch
     public static void Postfix()
     {
         ScFractionSelect_qwb_Patch._lobbyInjected = false;
+        ScFractionSelect_qwb_Patch._retryCount = 0;
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
     }
@@ -323,7 +308,7 @@ public static class ScFractionSelect_qwa_Patch
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
             _injectedQwa = true;
-            Plugin.Log.LogInfo($"[TowerInject] Injected tower slot (sid=tower) into SoFractions.");
+            Plugin.Log.LogInfo("[TowerInject] Injected tower slot (sid=tower) into SoFractions.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
@@ -347,6 +332,7 @@ public static class ScFractionSelect_qwa_Patch
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
         }
 
+        // FIX: break after first substitution to avoid touching other string fields
         bool sidSet = false;
         foreach (var f in typeof(FractionLobbyAsset).GetFields(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
@@ -360,6 +346,7 @@ public static class ScFractionSelect_qwa_Patch
                     f.SetValue(slot, "tower");
                     Plugin.Log.LogInfo($"[TowerInject] Set field '{f.Name}' (was 'human') -> 'tower'");
                     sidSet = true;
+                    break; // stop after first match
                 }
             }
             catch { }
@@ -386,9 +373,12 @@ public static class ScFractionSelect_qwa_Patch
 public static class ScFractionSelect_qwb_Patch
 {
     internal static bool _lobbyInjected = false;
+    internal static int  _retryCount    = 0;
+    private  const  int  MaxRetries     = 2;
 
     public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
     {
+        // Guard: list must exist and be non-empty before we touch it
         if (__result == null || __result.Count == 0)
         {
             Plugin.Log.LogWarning("[TowerInject] qwb: result null or empty — skipping premature call.");
@@ -397,14 +387,33 @@ public static class ScFractionSelect_qwb_Patch
 
         if (!Plugin.DbInjected) return;
 
+        // FIX: idempotency check — if tower is already in the list, do nothing
         if (_lobbyInjected)
         {
             bool found = false;
-            try { for (int i = 0; i < __result.Count; i++) if (__result[i]?.sid == "tower") { found = true; break; } }
+            try
+            {
+                for (int i = 0; i < __result.Count; i++)
+                    if (__result[i]?.sid == "tower") { found = true; break; }
+            }
             catch { }
-            if (found) { Plugin.Log.LogInfo("[TowerInject] qwb: already injected, skipping."); return; }
-            Plugin.Log.LogInfo("[TowerInject] qwb: flag set but slot missing — re-injecting.");
+
+            if (found)
+            {
+                Plugin.Log.LogInfo("[TowerInject] qwb: tower already present, skipping.");
+                return;
+            }
+
+            // slot disappeared — retry up to MaxRetries times then give up
+            if (_retryCount >= MaxRetries)
+            {
+                Plugin.Log.LogError($"[TowerInject] qwb: tower slot missing after {MaxRetries} retries — aborting.");
+                return;
+            }
+
+            _retryCount++;
             _lobbyInjected = false;
+            Plugin.Log.LogWarning($"[TowerInject] qwb: slot missing — re-injecting (attempt {_retryCount}/{MaxRetries}).");
         }
 
         try
@@ -416,14 +425,24 @@ public static class ScFractionSelect_qwb_Patch
 
             var newSlot = ScFractionSelect_qwa_Patch.BuildSlot(src);
 
+            // FIX: build a fresh list, catching any Il2Cpp backing-array exceptions
             var freshList = new Il2CppSystem.Collections.Generic.List<FractionLobbyAsset>();
             for (int i = 0; i < __result.Count; i++)
-                freshList.Add(__result[i]);
-            freshList.Add(newSlot);
-            __result = freshList;
+            {
+                try { freshList.Add(__result[i]); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[TowerInject] qwb: failed to copy slot {i}: {ex.Message}"); }
+            }
 
+            try { freshList.Add(newSlot); }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[TowerInject] qwb: failed to add tower slot: {ex.Message}");
+                return;
+            }
+
+            __result = freshList;
             _lobbyInjected = true;
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (fresh-list path).");
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }

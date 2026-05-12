@@ -62,8 +62,6 @@ public static class ScLobby2_Init_Patch
     }
 }
 
-// PREFIX: runs before qwa spawns UI GameObjects.
-// Injects tower slot into SoFractions.fractions (array) and dict_ (dictionary).
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwa))]
 public static class ScFractionSelect_qwa_Patch
 {
@@ -74,22 +72,20 @@ public static class ScFractionSelect_qwa_Patch
             var assets = __instance?.fractionsAssets;
             if (assets == null) { Plugin.Log.LogWarning("[TowerInject] fractionsAssets null."); return; }
 
-            // ─ fractions array ───────────────────────────────────────────────
-            var arrFieldPtr = IL2CPP.GetIl2CppField(
-                Il2CppClassPointerStore<SoFractions>.NativeClassPtr, "fractions");
+            var classPtr  = Il2CppClassPointerStore<SoFractions>.NativeClassPtr;
+            var objPtr    = IL2CPP.Il2CppObjectBaseToPtrNotNull(assets);
 
-            IntPtr arrObjPtr = IntPtr.Zero;
-            IL2CPP.il2cpp_field_get_value(IL2CPP.Il2CppObjectBaseToPtrNotNull(assets), arrFieldPtr, ref arrObjPtr);
+            // ─ fractions array ───────────────────────────────────────────
+            var arrFieldPtr = IL2CPP.GetIl2CppField(classPtr, "fractions");
+            var arrObjPtr   = IL2CPP.il2cpp_field_get_value_object(arrFieldPtr, objPtr);
 
-            if (arrObjPtr == IntPtr.Zero) { Plugin.Log.LogWarning("[TowerInject] fractions array ptr is zero."); return; }
+            if (arrObjPtr == IntPtr.Zero) { Plugin.Log.LogWarning("[TowerInject] fractions ptr zero."); return; }
 
             var arr = new Il2CppReferenceArray<FractionLobbyAsset>(arrObjPtr);
 
-            // Already injected?
             for (int i = 0; i < arr.Length; i++)
-                if (arr[i]?.sid == "tower") return;
+                if (arr[i]?.sid == "tower") return; // already injected
 
-            // Find human slot as sprite source.
             FractionLobbyAsset src = null;
             for (int i = 0; i < arr.Length; i++)
                 if (arr[i]?.sid == "human") { src = arr[i]; break; }
@@ -106,24 +102,20 @@ public static class ScFractionSelect_qwa_Patch
                 card         = src.card
             };
 
-            // Resize array and write back.
             var newArr = new Il2CppReferenceArray<FractionLobbyAsset>(arr.Length + 1);
             for (int i = 0; i < arr.Length; i++) newArr[i] = arr[i];
             newArr[arr.Length] = slot;
 
             IL2CPP.il2cpp_gc_wbarrier_set_field(
-                IL2CPP.Il2CppObjectBaseToPtrNotNull(assets),
-                IL2CPP.Il2CppObjectBaseToPtrNotNull(assets) + (int)IL2CPP.il2cpp_field_get_offset(arrFieldPtr),
+                objPtr,
+                objPtr + (int)IL2CPP.il2cpp_field_get_offset(arrFieldPtr),
                 IL2CPP.Il2CppObjectBaseToPtrNotNull(newArr));
 
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
-            // ─ dict_ ─────────────────────────────────────────────────────
-            var dictFieldPtr = IL2CPP.GetIl2CppField(
-                Il2CppClassPointerStore<SoFractions>.NativeClassPtr, "dict_");
-
-            IntPtr dictObjPtr = IntPtr.Zero;
-            IL2CPP.il2cpp_field_get_value(IL2CPP.Il2CppObjectBaseToPtrNotNull(assets), dictFieldPtr, ref dictObjPtr);
+            // ─ dict_ ───────────────────────────────────────────────────
+            var dictFieldPtr = IL2CPP.GetIl2CppField(classPtr, "dict_");
+            var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
 
             if (dictObjPtr != IntPtr.Zero)
             {
@@ -134,10 +126,7 @@ public static class ScFractionSelect_qwa_Patch
                     Plugin.Log.LogInfo("[TowerInject] dict_ updated.");
                 }
             }
-            else
-            {
-                Plugin.Log.LogWarning("[TowerInject] dict_ is null, skipping.");
-            }
+            else Plugin.Log.LogWarning("[TowerInject] dict_ is null, skipping.");
 
             Plugin.Log.LogInfo("[TowerInject] Injected tower into SoFractions before qwa.");
         }
@@ -145,7 +134,6 @@ public static class ScFractionSelect_qwa_Patch
     }
 }
 
-// qwb fallback in case qwa prefix path fails.
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {

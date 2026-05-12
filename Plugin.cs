@@ -38,7 +38,6 @@ public class Plugin : BasePlugin
         Log.LogInfo("TowerLegacy loaded.");
     }
 
-    // Called from ScLobby2.Init postfix — by then Hex assembly is fully live.
     internal static void DumpAndPatchSlotSetters()
     {
         if (SlotDumped) return;
@@ -57,7 +56,11 @@ public class Plugin : BasePlugin
                     try
                     {
                         var parms = m.GetParameters();
-                        if (!parms.Any(p => p.ParameterType == typeof(FractionLobbyAsset))) continue;
+                        // Match by name to avoid IL2CPP managed/native type identity mismatch
+                        bool takesFla = parms.Any(p =>
+                            p.ParameterType.Name == "FractionLobbyAsset" ||
+                            p.ParameterType.FullName?.Contains("FractionLobbyAsset") == true);
+                        if (!takesFla) continue;
 
                         Log.LogInfo($"[SlotDump] {type.Name}.{m.Name}({string.Join(", ", parms.Select(p => p.ParameterType.Name + " " + p.Name))})");
                         found++;
@@ -74,12 +77,12 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[SlotDump] Failed: {ex.Message}"); }
     }
 
-    public static void SlotSetterPostfix(object __instance, FractionLobbyAsset __0)
+    public static void SlotSetterPostfix(object __instance, object __0)
     {
         try
         {
             var typeName   = __instance?.GetType().Name ?? "(static)";
-            var sid        = __0?.sid ?? "null";
+            var sid        = __0?.GetType().GetProperty("sid")?.GetValue(__0)?.ToString() ?? "null";
             var methodName = new System.Diagnostics.StackFrame(1).GetMethod()?.Name ?? "?";
             Log.LogInfo($"[SlotCall] {typeName}.{methodName} sid={sid}");
 
@@ -90,8 +93,7 @@ public class Plugin : BasePlugin
                 {
                     try
                     {
-                        var goType    = go.GetType();
-                        var gciMethod = goType.GetMethods()
+                        var gciMethod = go.GetType().GetMethods()
                             .FirstOrDefault(x => x.Name == "GetComponentsInChildren" && x.IsGenericMethod && x.GetParameters().Length == 0);
                         if (gciMethod != null)
                         {
@@ -137,8 +139,6 @@ public static class ScLobby2_Init_Patch
     {
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
-
-        // Defer dump to here so Hex types are fully resolved.
         Plugin.DumpAndPatchSlotSetters();
     }
 }

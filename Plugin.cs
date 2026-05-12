@@ -62,6 +62,8 @@ public static class ScLobby2_Init_Patch
     }
 }
 
+// PREFIX: runs before qwa spawns UI GameObjects.
+// Injects tower slot into SoFractions.fractions (array) and dict_ (dictionary).
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwa))]
 public static class ScFractionSelect_qwa_Patch
 {
@@ -72,34 +74,82 @@ public static class ScFractionSelect_qwa_Patch
             var assets = __instance?.fractionsAssets;
             if (assets == null) { Plugin.Log.LogWarning("[TowerInject] fractionsAssets null."); return; }
 
-            var classPtr = Il2CppClassPointerStore<SoFractions>.NativeClassPtr;
-            Plugin.Log.LogInfo($"[TowerInject] SoFractions classPtr: {classPtr}");
+            // ─ fractions array ───────────────────────────────────────────────
+            var arrFieldPtr = IL2CPP.GetIl2CppField(
+                Il2CppClassPointerStore<SoFractions>.NativeClassPtr, "fractions");
 
-            IntPtr iter = IntPtr.Zero;
-            IntPtr fieldPtr;
-            while ((fieldPtr = IL2CPP.il2cpp_class_get_fields(classPtr, ref iter)) != IntPtr.Zero)
+            IntPtr arrObjPtr = IntPtr.Zero;
+            IL2CPP.il2cpp_field_get_value(IL2CPP.Il2CppObjectBaseToPtrNotNull(assets), arrFieldPtr, ref arrObjPtr);
+
+            if (arrObjPtr == IntPtr.Zero) { Plugin.Log.LogWarning("[TowerInject] fractions array ptr is zero."); return; }
+
+            var arr = new Il2CppReferenceArray<FractionLobbyAsset>(arrObjPtr);
+
+            // Already injected?
+            for (int i = 0; i < arr.Length; i++)
+                if (arr[i]?.sid == "tower") return;
+
+            // Find human slot as sprite source.
+            FractionLobbyAsset src = null;
+            for (int i = 0; i < arr.Length; i++)
+                if (arr[i]?.sid == "human") { src = arr[i]; break; }
+            if (src == null) { Plugin.Log.LogWarning("[TowerInject] human slot not found."); return; }
+
+            var slot = new FractionLobbyAsset
             {
-                try
+                sid          = "tower",
+                icon         = src.icon,
+                slotFon      = src.slotFon,
+                statisticFon = src.statisticFon,
+                versusFon    = src.versusFon,
+                bigIcon      = src.bigIcon,
+                card         = src.card
+            };
+
+            // Resize array and write back.
+            var newArr = new Il2CppReferenceArray<FractionLobbyAsset>(arr.Length + 1);
+            for (int i = 0; i < arr.Length; i++) newArr[i] = arr[i];
+            newArr[arr.Length] = slot;
+
+            IL2CPP.il2cpp_gc_wbarrier_set_field(
+                IL2CPP.Il2CppObjectBaseToPtrNotNull(assets),
+                IL2CPP.Il2CppObjectBaseToPtrNotNull(assets) + (int)IL2CPP.il2cpp_field_get_offset(arrFieldPtr),
+                IL2CPP.Il2CppObjectBaseToPtrNotNull(newArr));
+
+            Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
+
+            // ─ dict_ ─────────────────────────────────────────────────────
+            var dictFieldPtr = IL2CPP.GetIl2CppField(
+                Il2CppClassPointerStore<SoFractions>.NativeClassPtr, "dict_");
+
+            IntPtr dictObjPtr = IntPtr.Zero;
+            IL2CPP.il2cpp_field_get_value(IL2CPP.Il2CppObjectBaseToPtrNotNull(assets), dictFieldPtr, ref dictObjPtr);
+
+            if (dictObjPtr != IntPtr.Zero)
+            {
+                var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
+                if (!dict.ContainsKey("tower"))
                 {
-                    string fieldName = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_field_get_name(fieldPtr));
-                    IntPtr typePtr   = IL2CPP.il2cpp_field_get_type(fieldPtr);
-                    string typeName  = Marshal.PtrToStringAnsi(IL2CPP.il2cpp_type_get_name(typePtr));
-                    Plugin.Log.LogInfo($"[TowerInject]   native field '{fieldName}' type='{typeName}'");
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.LogInfo($"[TowerInject]   native field ERROR: {ex.Message}");
+                    dict.Add("tower", slot);
+                    Plugin.Log.LogInfo("[TowerInject] dict_ updated.");
                 }
             }
+            else
+            {
+                Plugin.Log.LogWarning("[TowerInject] dict_ is null, skipping.");
+            }
+
+            Plugin.Log.LogInfo("[TowerInject] Injected tower into SoFractions before qwa.");
         }
-        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa native dump failed: {ex}"); }
+        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
 }
 
+// qwb fallback in case qwa prefix path fails.
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {
-    public static void Postfix(ref Il2CppCollections.List<FractionLobbyAsset> __result)
+    public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
     {
         try
         {

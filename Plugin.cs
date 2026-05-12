@@ -1,13 +1,15 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
+using Hex.Configs;
 using Hex.GameHub.Lobby.UI;
 using Hex.GameHub.UICommon;
-using Il2CppSystem.Collections.Generic;
+using Il2CppCollections = Il2CppSystem.Collections.Generic;
 
 namespace TowerLegacy;
 
@@ -42,7 +44,7 @@ public static class ScLobby2_Init_Patch
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {
-    public static void Postfix(ref List<FractionLobbyAsset> __result)
+    public static void Postfix(ref Il2CppCollections.List<FractionLobbyAsset> __result)
     {
         try
         {
@@ -63,7 +65,7 @@ public static class ScFractionSelect_qwb_Patch
                 }
             }
 
-            // Use Human as visual template (icons/backgrounds only, not a clone)
+            // Use Human as visual template (icons/backgrounds only, not a config clone)
             FractionLobbyAsset src = null;
             for (int i = 0; i < __result.Count; i++)
             {
@@ -101,6 +103,36 @@ public static class ScFractionSelect_qwb_Patch
     }
 }
 
+// Override the displayed name for the tower faction without touching localization tables.
+// Tries both get_Name and get_name since the exact getter may vary by obfuscation.
+[HarmonyPatch(typeof(FractionConfig), "get_Name")]
+public static class FractionConfig_GetName_Patch
+{
+    public static void Postfix(FractionConfig __instance, ref string __result)
+    {
+        try
+        {
+            if (TowerDbInjector.GetIdSafe(__instance) == "tower")
+                __result = "Tower";
+        }
+        catch { }
+    }
+}
+
+[HarmonyPatch(typeof(FractionConfig), "get_name")]
+public static class FractionConfig_get_name_Patch
+{
+    public static void Postfix(FractionConfig __instance, ref string __result)
+    {
+        try
+        {
+            if (TowerDbInjector.GetIdSafe(__instance) == "tower")
+                __result = "Tower";
+        }
+        catch { }
+    }
+}
+
 internal static class TowerDbInjector
 {
     public static void TryInject()
@@ -117,30 +149,23 @@ internal static class TowerDbInjector
                 return;
             }
 
-            var cjvType = hexAsm.GetType("cjv");
-            if (cjvType == null)
+            var fractionType = hexAsm.GetType("Hex.Configs.FractionConfig");
+            var cjvType      = hexAsm.GetType("cjv");
+
+            if (fractionType == null || cjvType == null)
             {
-                Plugin.Log.LogWarning("[TowerInject] cjv type not found.");
+                Plugin.Log.LogWarning("[TowerInject] Required types not found.");
                 return;
             }
 
             var repo = GetStaticProperty(cjvType, "bxjy");
-            if (repo == null)
-            {
-                Plugin.Log.LogWarning("[TowerInject] cjv.bxjy not found.");
-                return;
-            }
+            if (repo == null) { Plugin.Log.LogWarning("[TowerInject] cjv.bxjy not found."); return; }
 
             var container = GetMember(repo, "bxni");
-            if (container == null)
-            {
-                Plugin.Log.LogWarning("[TowerInject] repo.bxni not found.");
-                return;
-            }
+            if (container == null) { Plugin.Log.LogWarning("[TowerInject] repo.bxni not found."); return; }
 
             var listObj = GetMember(container, "bxjw");
             var dictObj = GetMember(container, "bxjx");
-
             if (listObj == null || dictObj == null)
             {
                 Plugin.Log.LogWarning("[TowerInject] bxjw or bxjx missing.");
@@ -150,27 +175,44 @@ internal static class TowerDbInjector
             Plugin.Log.LogInfo($"[TowerInject] bxjw type = {listObj.GetType().FullName}");
             Plugin.Log.LogInfo($"[TowerInject] bxjx type = {dictObj.GetType().FullName}");
 
-            // Already linked into dict — nothing to do
-            if (FindByIdInDict(dictObj, "tower") != null)
+            // Already injected — nothing to do
+            var existing = FindByIdInDict(dictObj, "tower") ?? FindByIdInList(listObj, "tower");
+            if (existing != null)
             {
                 Plugin.DbInjected = true;
-                Plugin.Log.LogInfo("[TowerInject] tower already exists in bxjx.");
+                Plugin.Log.LogInfo("[TowerInject] tower already exists in DB.");
                 return;
             }
 
-            // Find the real tower config already loaded from DB/fractions/tower.json
-            var tower = FindByIdInList(listObj, "tower");
-            if (tower == null)
+            // Find Human to use as base
+            var human = FindByIdInDict(dictObj, "human") ?? FindByIdInList(listObj, "human");
+            if (human == null)
             {
-                Plugin.Log.LogWarning("[TowerInject] tower not found in loaded DB list. Check DB/fractions/tower.json exists.");
+                Plugin.Log.LogWarning("[TowerInject] human config not found.");
                 DumpListIds(listObj);
                 return;
             }
 
-            // Link it into the dictionary so lookup by ID succeeds — no cloning
+            Plugin.Log.LogInfo("[TowerInject] Cloning human into tower...");
+
+            var tower = Activator.CreateInstance(fractionType);
+            if (tower == null)
+            {
+                Plugin.Log.LogWarning("[TowerInject] Could not create FractionConfig instance.");
+                return;
+            }
+
+            // Copy all fields except name/desc/narrativeDesc — those are reference types
+            // pointing to shared localization objects; copying them causes both factions
+            // to display the same text. The Harmony name patch handles naming instead.
+            CopyAllFields(fractionType, human, tower);
+            SetId(tower, "tower");
+
+            AddToList(listObj, tower);
             AddToDict(dictObj, "tower", tower);
+
             Plugin.DbInjected = true;
-            Plugin.Log.LogInfo("[TowerInject] Linked real tower config into bxjx.");
+            Plugin.Log.LogInfo("[TowerInject] tower injected into bxjw and bxjx.");
         }
         catch (Exception ex)
         {
@@ -178,70 +220,60 @@ internal static class TowerDbInjector
         }
     }
 
-    static object GetStaticProperty(Type t, string name)
+    // Public so the Harmony name patches can call it
+    public static string GetIdSafe(object cfg)
     {
-        var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-        if (p != null && p.CanRead)
-            return p.GetValue(null);
-
-        var m = t.GetMethod("get_" + name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-        if (m != null)
-            return m.Invoke(null, null);
-
-        return null;
+        try { return GetId(cfg); }
+        catch { return null; }
     }
 
-    static object GetMember(object obj, string name)
+    static void CopyAllFields(Type rootType, object src, object dst)
     {
-        var t = obj.GetType();
-
-        var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-        if (p != null && p.CanRead)
-            return p.GetValue(obj);
-
-        var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-        if (f != null)
-            return f.GetValue(obj);
-
-        var m = t.GetMethod("get_" + name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-        if (m != null)
-            return m.Invoke(obj, null);
-
-        return null;
-    }
-
-    static object FindByIdInList(object listObj, string wantedId)
-    {
-        var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
-        var itemProp = listObj.GetType().GetProperty("Item");
-
-        for (int i = 0; i < count; i++)
+        // Skip these — they are shared reference-type localization objects.
+        // Copying them bleeds into the original faction's display text.
+        var skip = new HashSet<string>
         {
-            var item = itemProp.GetValue(listObj, new object[] { i });
-            if (item == null) continue;
+            "name", "Name", "_name",
+            "desc", "Desc", "_desc",
+            "narrativeDesc", "NarrativeDesc", "_narrativeDesc"
+        };
 
-            if (GetId(item) == wantedId)
-                return item;
+        foreach (var t in GetTypeChain(rootType))
+        {
+            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                if (skip.Contains(f.Name)) continue;
+                try { f.SetValue(dst, f.GetValue(src)); }
+                catch { }
+            }
+        }
+    }
+
+    static void SetId(object cfg, string newId)
+    {
+        foreach (var t in GetTypeChain(cfg.GetType()))
+        {
+            foreach (var name in new[] { "id", "Id", "sid", "_id" })
+            {
+                var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (f != null && f.FieldType == typeof(string))
+                {
+                    f.SetValue(cfg, newId);
+                    Plugin.Log.LogInfo($"[TowerInject] Set {t.FullName}.{name} = {newId}");
+                    return;
+                }
+
+                var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (p != null && p.CanWrite && p.PropertyType == typeof(string))
+                {
+                    p.SetValue(cfg, newId);
+                    Plugin.Log.LogInfo($"[TowerInject] Set {t.FullName}.{name} = {newId}");
+                    return;
+                }
+            }
         }
 
-        return null;
-    }
-
-    static object FindByIdInDict(object dictObj, string wantedId)
-    {
-        var containsKey = dictObj.GetType().GetMethod("ContainsKey");
-        var itemProp    = dictObj.GetType().GetProperty("Item");
-
-        if (containsKey != null && (bool)containsKey.Invoke(dictObj, new object[] { wantedId }))
-            return itemProp.GetValue(dictObj, new object[] { wantedId });
-
-        return null;
-    }
-
-    static void AddToDict(object dictObj, string key, object value)
-    {
-        dictObj.GetType().GetMethod("Add").Invoke(dictObj, new object[] { key, value });
-        Plugin.Log.LogInfo($"[TowerInject] Added {key} to bxjx dictionary.");
+        Plugin.Log.LogWarning("[TowerInject] Could not find id field/property to set.");
     }
 
     static string GetId(object cfg)
@@ -263,13 +295,74 @@ internal static class TowerDbInjector
         return null;
     }
 
-    static System.Collections.Generic.IEnumerable<Type> GetTypeChain(Type t)
+    static object GetStaticProperty(Type t, string name)
     {
-        while (t != null)
+        var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        if (p != null && p.CanRead) return p.GetValue(null);
+
+        var m = t.GetMethod("get_" + name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+        if (m != null) return m.Invoke(null, null);
+
+        return null;
+    }
+
+    static object GetMember(object obj, string name)
+    {
+        var t = obj.GetType();
+
+        var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (p != null && p.CanRead) return p.GetValue(obj);
+
+        var f = t.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (f != null) return f.GetValue(obj);
+
+        var m = t.GetMethod("get_" + name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (m != null) return m.Invoke(obj, null);
+
+        return null;
+    }
+
+    static object FindByIdInList(object listObj, string wantedId)
+    {
+        var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
+        var itemProp = listObj.GetType().GetProperty("Item");
+
+        for (int i = 0; i < count; i++)
         {
-            yield return t;
-            t = t.BaseType;
+            var item = itemProp.GetValue(listObj, new object[] { i });
+            if (item == null) continue;
+            if (GetId(item) == wantedId) return item;
         }
+
+        return null;
+    }
+
+    static object FindByIdInDict(object dictObj, string wantedId)
+    {
+        var containsKey = dictObj.GetType().GetMethod("ContainsKey");
+        var itemProp    = dictObj.GetType().GetProperty("Item");
+
+        if (containsKey != null && (bool)containsKey.Invoke(dictObj, new object[] { wantedId }))
+            return itemProp.GetValue(dictObj, new object[] { wantedId });
+
+        return null;
+    }
+
+    static void AddToList(object listObj, object item)
+    {
+        listObj.GetType().GetMethod("Add").Invoke(listObj, new[] { item });
+        Plugin.Log.LogInfo("[TowerInject] Added tower to bxjw list.");
+    }
+
+    static void AddToDict(object dictObj, string key, object value)
+    {
+        dictObj.GetType().GetMethod("Add").Invoke(dictObj, new object[] { key, value });
+        Plugin.Log.LogInfo($"[TowerInject] Added {key} to bxjx dictionary.");
+    }
+
+    static IEnumerable<Type> GetTypeChain(Type t)
+    {
+        while (t != null) { yield return t; t = t.BaseType; }
     }
 
     static void DumpListIds(object listObj)
@@ -278,9 +371,7 @@ internal static class TowerDbInjector
         {
             var count    = (int)listObj.GetType().GetProperty("Count").GetValue(listObj);
             var itemProp = listObj.GetType().GetProperty("Item");
-
             Plugin.Log.LogInfo($"[TowerInject] bxjw count = {count}");
-
             for (int i = 0; i < count && i < 30; i++)
             {
                 var item = itemProp.GetValue(listObj, new object[] { i });

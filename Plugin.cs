@@ -81,10 +81,8 @@ public class Plugin : BasePlugin
         try
         {
             if (ptr == IntPtr.Zero) return null;
-            // Read length field at offset 16 (object header size on 64-bit IL2CPP)
             int len = Marshal.ReadInt32(ptr, 16);
-            if (len <= 0 || len > 2048) return null;  // sanity bounds
-            // Chars start at offset 20
+            if (len <= 0 || len > 2048) return null;
             return Marshal.PtrToStringUni(ptr + 20, len);
         }
         catch { return null; }
@@ -96,20 +94,6 @@ public class Plugin : BasePlugin
         { "tower_name",   "Tower City" },
         { "tower_desc",   "A city built around a great tower." },
         { "tower_select", "Select Tower City" },
-    };
-
-    static readonly HashSet<string> LocMethodNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    {
-        "Get", "GetString", "GetText", "Translate", "Localize",
-        "GetValue", "Lookup", "GetLocalized", "GetLocalizedString",
-        "GetKey", "GetEntry",
-    };
-
-    // Type name fragments that indicate a localization-related class
-    static readonly string[] LocTypeKeywords = new[]
-    {
-        "loc", "local", "lang", "text", "string", "i18n", "trans", "dict",
-        "Loc", "Local", "Lang", "Text", "String", "I18n", "Trans", "Dict",
     };
 
     static void PatchLocalization()
@@ -125,26 +109,19 @@ public class Plugin : BasePlugin
 
             foreach (var type in hexAsm.GetTypes())
             {
-                // Only scan types whose name suggests localization responsibility
-                bool isLocType = LocTypeKeywords.Any(k =>
-                    type.Name.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    (type.FullName != null && type.FullName.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0));
-
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
                                                    BindingFlags.Instance | BindingFlags.Static))
                 {
                     try
                     {
+                        if (m.IsAbstract) continue;
                         if (m.ReturnType != typeof(string)) continue;
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
-                        if (m.IsAbstract) continue;
-
-                        // Must either be a known-named loc method, or be in a loc-type
-                        if (!LocMethodNames.Contains(m.Name) && !isLocType) continue;
+                        // skip property accessors unrelated to lookups (getters/setters for string fields)
+                        if (m.Name.StartsWith("set_")) continue;
 
                         Harmony.Patch(m, prefix: prefix);
-                        Log.LogDebug($"[LocPatch] Patched {type.FullName}.{m.Name}");
                         patched++;
                     }
                     catch { }
@@ -156,10 +133,6 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
-    /// <summary>
-    /// Reads the native IL2CPP string directly via Marshal to bypass the
-    /// Il2CppStringToManaged trampoline, which crashes on null/invalid ptrs.
-    /// </summary>
     public static bool LocPrefix(IntPtr __0, ref string __result)
     {
         try
@@ -170,7 +143,7 @@ public class Plugin : BasePlugin
             {
                 Log.LogInfo($"[LocPatch] Intercepted key '{key}' → '{val}'");
                 __result = val;
-                return false; // skip original
+                return false;
             }
         }
         catch { }

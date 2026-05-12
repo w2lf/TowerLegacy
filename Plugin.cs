@@ -69,24 +69,30 @@ public static class ScFractionSelect_qwa_Patch
         try
         {
             var assets = __instance?.fractionsAssets;
-            if (assets == null) { Plugin.Log.LogWarning("[TowerInject] fractionsAssets null in qwa."); return; }
+            if (assets == null) { Plugin.Log.LogWarning("[TowerInject] fractionsAssets null."); return; }
 
-            // Dump all fields on SoFractions so we can identify the array field.
-            Plugin.Log.LogInfo($"[TowerInject] SoFractions type: {assets.GetType().FullName}");
-            foreach (var f in assets.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            var classPtr = Il2CppClassPointerStore<SoFractions>.NativeClassPtr;
+            Plugin.Log.LogInfo($"[TowerInject] SoFractions classPtr: {classPtr}");
+
+            // Walk all native fields via il2cpp_class_get_fields
+            IntPtr iter = IntPtr.Zero;
+            IntPtr fieldPtr;
+            while ((fieldPtr = IL2CPP.il2cpp_class_get_fields(classPtr, ref iter)) != IntPtr.Zero)
             {
                 try
                 {
-                    var val = f.GetValue(assets);
-                    Plugin.Log.LogInfo($"[TowerInject]   field '{f.Name}' ({f.FieldType.Name}) = {(val == null ? "null" : val.GetType().Name + " len=" + TowerDbInjector.TryGetLength(val))}");
+                    string fieldName = IL2CPP.il2cpp_field_get_name(fieldPtr);
+                    var    fieldType = IL2CPP.il2cpp_field_get_type(fieldPtr);
+                    string typeName  = IL2CPP.il2cpp_type_get_name(fieldType);
+                    Plugin.Log.LogInfo($"[TowerInject]   native field '{fieldName}' type='{typeName}'");
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Log.LogInfo($"[TowerInject]   field '{f.Name}' ({f.FieldType.Name}) = ERROR: {ex.Message}");
+                    Plugin.Log.LogInfo($"[TowerInject]   native field ERROR: {ex.Message}");
                 }
             }
         }
-        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa dump failed: {ex}"); }
+        catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa native dump failed: {ex}"); }
     }
 }
 
@@ -149,20 +155,6 @@ internal static class TowerDbInjector
         Path.Combine(
             Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!,
             "DB", "fractions", "tower.json");
-
-    // Helper: try to get a length/count from an unknown object for logging.
-    public static string TryGetLength(object val)
-    {
-        try
-        {
-            var lenProp = val.GetType().GetProperty("Length");
-            if (lenProp != null) return lenProp.GetValue(val)?.ToString() ?? "?";
-            var cntProp = val.GetType().GetProperty("Count");
-            if (cntProp != null) return cntProp.GetValue(val)?.ToString() ?? "?";
-        }
-        catch { }
-        return "?";
-    }
 
     public static void TryInject()
     {

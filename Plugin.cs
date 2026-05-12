@@ -1,10 +1,3 @@
-// Workaround: IL2CPP net6 BepInEx target is missing NullableAttribute compiler support.
-namespace System.Runtime.CompilerServices
-{
-    internal sealed class NullableAttribute : Attribute { public NullableAttribute(byte _) { } public NullableAttribute(byte[] _) { } }
-    internal sealed class NullableContextAttribute : Attribute { public NullableContextAttribute(byte _) { } }
-}
-
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -22,6 +15,13 @@ using Hex.GameHub.UICommon;
 using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Il2CppCollections = Il2CppSystem.Collections.Generic;
+
+// Workaround: IL2CPP net6 BepInEx target missing NullableAttribute compiler support.
+namespace System.Runtime.CompilerServices
+{
+    internal sealed class NullableAttribute : Attribute { public NullableAttribute(byte _) { } public NullableAttribute(byte[] _) { } }
+    internal sealed class NullableContextAttribute : Attribute { public NullableContextAttribute(byte _) { } }
+}
 
 namespace TowerLegacy;
 

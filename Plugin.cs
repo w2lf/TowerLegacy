@@ -36,30 +36,33 @@ public class Plugin : BasePlugin
         Harmony.PatchAll();
         Log.LogInfo("TowerLegacy loaded.");
     }
+}
 
-    // Walk full inheritance chain and dump all fields + readable properties.
-    internal static void DumpObject(string label, object obj)
+// ── FACTION DEFINITION ────────────────────────────────────────────────────────
+// Edit these to customise your faction. String values that start with a real
+// localisation key will be resolved by the game; plain strings are shown as-is
+// because we patch FractionConfig.get_name / get_desc below.
+internal static class TowerFaction
+{
+    // ── Config (game DB) ──────────────────────────────────────────────────
+    public const string Id           = "tower";
+    public const string DisplayName  = "Tower City";
+    public const string Desc         = "Masters of stone and sorcery, the Tower City mages command arcane constructs and disciplined soldiers.";
+    public const string NarrativeDesc= "From their obsidian spires, the Tower City sages watch the horizon for enemies who dare challenge their dominion.";
+    public const string IconKey      = "fraction_human";   // reuse human sprite key until we have our own
+    public const string Biome        = "Snow";
+    public const string CityKey      = "human_city";       // reuse human city model for now
+    public const string ResourceName = "crystals";
+
+    // Hero ids to assign. Keep human heroes for now; swap later with custom ids.
+    public static readonly string[] Heroes = { };  // empty = inherit human's list
+
+    // City name pool shown on the map.
+    public static readonly string[] CityNames =
     {
-        if (obj == null) { Log.LogInfo($"[Dump] {label} = null"); return; }
-        Log.LogInfo($"[Dump] ===== {label} ({obj.GetType().FullName}) =====");
-        var t = obj.GetType();
-        while (t != null && t != typeof(object))
-        {
-            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                try { Log.LogInfo($"[Dump]  F {f.DeclaringType?.Name}.{f.Name} : {f.FieldType.Name} = {f.GetValue(obj)}"); }
-                catch (Exception ex) { Log.LogInfo($"[Dump]  F {f.DeclaringType?.Name}.{f.Name} : {f.FieldType.Name} = <err:{ex.GetType().Name}>"); }
-            }
-            foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                if (!p.CanRead) continue;
-                try { Log.LogInfo($"[Dump]  P {p.DeclaringType?.Name}.{p.Name} : {p.PropertyType.Name} = {p.GetValue(obj)}"); }
-                catch (Exception ex) { Log.LogInfo($"[Dump]  P {p.DeclaringType?.Name}.{p.Name} : {p.PropertyType.Name} = <err:{ex.GetType().Name}>"); }
-            }
-            t = t.BaseType;
-        }
-        Log.LogInfo($"[Dump] ===== end {label} =====");
-    }
+        "Arcantum", "Spire's Edge", "Vorath Keep", "Crystalhold",
+        "Ebonveil", "The Bastion", "Coldforge", "Mirethian",
+    };
 }
 
 // ── PATCHES ───────────────────────────────────────────────────────────────────
@@ -71,6 +74,37 @@ public static class ScLobby2_Init_Patch
     {
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
+    }
+}
+
+// Override the name/desc properties so plain strings show without localisation.
+[HarmonyPatch(typeof(FractionConfig), "get_name")]
+public static class FractionConfig_get_name_Patch
+{
+    public static void Postfix(FractionConfig __instance, ref string __result)
+    {
+        try { if (__instance?.id == TowerFaction.Id) __result = TowerFaction.DisplayName; }
+        catch { }
+    }
+}
+
+[HarmonyPatch(typeof(FractionConfig), "get_desc")]
+public static class FractionConfig_get_desc_Patch
+{
+    public static void Postfix(FractionConfig __instance, ref string __result)
+    {
+        try { if (__instance?.id == TowerFaction.Id) __result = TowerFaction.Desc; }
+        catch { }
+    }
+}
+
+[HarmonyPatch(typeof(FractionConfig), "get_narrativeDesc")]
+public static class FractionConfig_get_narrativeDesc_Patch
+{
+    public static void Postfix(FractionConfig __instance, ref string __result)
+    {
+        try { if (__instance?.id == TowerFaction.Id) __result = TowerFaction.NarrativeDesc; }
+        catch { }
     }
 }
 
@@ -100,10 +134,7 @@ public static class ScFractionSelect_qwa_Patch
                 if (arr[i]?.sid == "human") { src = arr[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human slot not found."); return; }
 
-            // Dump FractionLobbyAsset fields once so we know what to override.
-            Plugin.DumpObject("FractionLobbyAsset(human)", src);
-
-            var slot   = BuildSlot(src, keepSid: true);
+            var slot   = BuildSlot(src);
             var newArr = new Il2CppReferenceArray<FractionLobbyAsset>(arr.Length + 1);
             for (int i = 0; i < arr.Length; i++) newArr[i] = arr[i];
             newArr[arr.Length] = slot;
@@ -119,26 +150,25 @@ public static class ScFractionSelect_qwa_Patch
             if (dictObjPtr != IntPtr.Zero)
             {
                 var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
-                Plugin.Log.LogInfo($"[TowerInject] dict_ keys: {string.Join(", ", Enumerable.Range(0, dict.Count).Select(i => "(iterating)"))}");
-                // Just log count for now.
-                Plugin.Log.LogInfo($"[TowerInject] dict_ has {dict.Count} entries.");
+                Plugin.Log.LogInfo($"[TowerInject] dict_ has {dict.Count} entries, skipping tower key insert.");
             }
-            else Plugin.Log.LogWarning("[TowerInject] dict_ is null.");
 
             _injectedQwa = true;
-            Plugin.Log.LogInfo("[TowerInject] Injected tower slot (sid=human) into SoFractions.");
+            Plugin.Log.LogInfo("[TowerInject] Injected tower slot into SoFractions.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
 
-    internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src, bool keepSid = false)
+    internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src)
     {
         var slot = new FractionLobbyAsset();
+        // Copy all fields from human (sprites etc.)
         foreach (var f in typeof(FractionLobbyAsset).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
-        if (!keepSid) slot.sid = "tower";
+        // Keep sid=human so no downstream dict lookup for "tower" crashes.
+        // We distinguish visually via FractionConfig.name patch above.
         return slot;
     }
 }
@@ -162,8 +192,8 @@ public static class ScFractionSelect_qwb_Patch
                 if (__result[i]?.sid == "human") { src = __result[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
-            __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src, keepSid: true));
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=human).");
+            __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }
@@ -197,10 +227,7 @@ internal static class TowerDbInjector
             if (humanCfg == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
             Plugin.Log.LogInfo($"[TowerInject] human ok, id={humanCfg.id}");
 
-            // Deep dump FractionConfig so we know every field name.
-            Plugin.DumpObject("FractionConfig(human)", humanCfg);
-
-            if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
+            if (FindByIdInDict(dictObj, TowerFaction.Id) != null || FindByIdInList(listObj, TowerFaction.Id) != null)
             { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
 
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
@@ -210,7 +237,29 @@ internal static class TowerDbInjector
             foreach (var p in typeof(FractionConfig).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 try { if (p.CanRead && p.CanWrite) p.SetValue(tower, p.GetValue(humanCfg)); } catch { }
 
-            tower.id = "tower";
+            // ── Apply Tower overrides ─────────────────────────────────────
+            tower.id           = TowerFaction.Id;
+            tower.name         = TowerFaction.DisplayName;   // raw value; get_name patch also covers UI
+            tower.desc         = TowerFaction.Desc;
+            tower.narrativeDesc= TowerFaction.NarrativeDesc;
+            tower.icon         = TowerFaction.IconKey;
+            tower.biome        = TowerFaction.Biome;
+            tower.city         = TowerFaction.CityKey;
+            tower.resourceName = TowerFaction.ResourceName;
+
+            // City names
+            var cities = new Il2CppCollections.List<string>();
+            foreach (var cn in TowerFaction.CityNames) cities.Add(cn);
+            tower.cityNames = cities;
+
+            // Heroes — if empty, inherit human's list (already copied above)
+            if (TowerFaction.Heroes.Length > 0)
+            {
+                var heroes = new Il2CppCollections.List<string>();
+                foreach (var h in TowerFaction.Heroes) heroes.Add(h);
+                tower.heroes = heroes;
+            }
+
             Plugin.Log.LogInfo($"[TowerInject] tower cloned, id={tower.id}");
 
             var typedList = listObj as Il2CppCollections.List<FractionConfig>
@@ -219,7 +268,7 @@ internal static class TowerDbInjector
                             ?? new Il2CppCollections.Dictionary<string, FractionConfig>(((Il2CppSystem.Object)dictObj).Pointer);
 
             typedList.Add(tower);
-            typedDict.Add("tower", tower);
+            typedDict.Add(TowerFaction.Id, tower);
 
             Plugin.DbInjected = true;
             Plugin.Log.LogInfo("[TowerInject] tower injected into DB.");

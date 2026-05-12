@@ -145,8 +145,6 @@ public class Plugin : BasePlugin
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
                         if (m.Name.StartsWith("set_") || m.Name.StartsWith("get_")) continue;
 
-                        // Use Postfix so the original runs (returns real string for normal keys)
-                        // and we only override when the key is ours.
                         Harmony.Patch(m, postfix: postfix);
                         patched++;
                         Log.LogInfo($"[LocPatch] Patched {type.Name}.{m.Name}");
@@ -163,8 +161,6 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
-    // Postfix: runs after the original. Only override when the key is ours.
-    // __0 = first param (the key), __result = current return value.
     public static void LocPostfix(string __0, ref string __result)
     {
         try
@@ -186,6 +182,9 @@ public static class ScLobby2_Init_Patch
 {
     public static void Postfix()
     {
+        // Reset the qwb flag so a scene reload gets a fresh injection.
+        ScFractionSelect_qwb_Patch._lobbyInjected = false;
+
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
     }
@@ -291,26 +290,38 @@ public static class ScFractionSelect_qwa_Patch
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwb))]
 public static class ScFractionSelect_qwb_Patch
 {
-    static readonly HashSet<IntPtr> _injected = new HashSet<IntPtr>();
+    // Simple bool flag — IL2Cpp List<T> pointers change between calls so a
+    // pointer-keyed HashSet never deduplicates correctly.
+    internal static bool _lobbyInjected = false;
 
     public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
     {
-        // Guard: only run after DB is fully loaded to avoid null-array crashes.
+        // Guard 1: DB must be fully loaded before we touch lobby assets.
         if (!Plugin.DbInjected) return;
+
+        // Guard 2: only inject once per lobby open (reset by ScLobby2.Init postfix).
+        if (_lobbyInjected)
+        {
+            Plugin.Log.LogInfo("[TowerInject] qwb: lobby already injected, skipping.");
+            return;
+        }
+
+        // Guard 3: null/empty list means the method fired before assets were ready.
+        if (__result == null || __result.Count == 0)
+        {
+            Plugin.Log.LogWarning("[TowerInject] qwb: result null or empty — skipping premature call.");
+            return;
+        }
 
         try
         {
-            if (__result == null || __result.Count == 0) return;
-            var listPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(__result);
-            if (_injected.Contains(listPtr)) return;
-            _injected.Add(listPtr);
-
             FractionLobbyAsset src = null;
             for (int i = 0; i < __result.Count; i++)
                 if (__result[i]?.sid == "human") { src = __result[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
             __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
+            _lobbyInjected = true;
             Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }

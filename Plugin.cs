@@ -96,9 +96,6 @@ public static class ScFractionSelect_qwb_Patch
     }
 }
 
-// The game passes FractionConfig.name through a loc lookup before display.
-// Setting name="" in the injector prevents a bad loc result.
-// These patches are the authoritative source for the displayed name.
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {
@@ -165,6 +162,7 @@ internal static class TowerDbInjector
             if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
 
+            // 1. Find human as the base
             var humanRaw = FindByIdInList(listObj, "human");
             if (humanRaw == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
 
@@ -173,16 +171,21 @@ internal static class TowerDbInjector
 
             Plugin.Log.LogInfo($"[TowerInject] human ok, id={human.id}");
 
+            // 2. Allocate new config and copy ALL fields from human first
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
 
+            CopyAllFields(human, tower);
+
+            // 3. Override only what tower.json specifies
             tower.id            = data.id;
-            tower.name          = "";          // empty: prevents loc system showing "Loc:..."
+            tower.name          = "";               // empty prevents "Loc:..." display
             tower.desc          = data.desc;
             tower.narrativeDesc = data.narrativeDesc;
 
             Plugin.Log.LogInfo($"[TowerInject] tower created, id={tower.id}");
 
+            // 4. Add to collections
             var typedList = listObj as Il2CppCollections.List<FractionConfig>
                             ?? new Il2CppCollections.List<FractionConfig>(
                                 ((Il2CppSystem.Object)listObj).Pointer);
@@ -200,6 +203,31 @@ internal static class TowerDbInjector
         {
             Plugin.Log.LogError($"[TowerInject] Injection failed: {ex}");
         }
+    }
+
+    // Copy every public field and readable/writable property from src to dst.
+    // This ensures no null arrays or missing references on the new config.
+    static void CopyAllFields(FractionConfig src, FractionConfig dst)
+    {
+        var type = typeof(FractionConfig);
+
+        foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            try { field.SetValue(dst, field.GetValue(src)); }
+            catch { }
+        }
+
+        foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            try
+            {
+                if (prop.CanRead && prop.CanWrite)
+                    prop.SetValue(dst, prop.GetValue(src));
+            }
+            catch { }
+        }
+
+        Plugin.Log.LogInfo("[TowerInject] CopyAllFields complete.");
     }
 
     public static string GetIdSafe(object cfg)

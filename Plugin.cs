@@ -23,7 +23,8 @@ namespace System.Runtime.CompilerServices
     internal sealed class NullableContextAttribute : Attribute { public NullableContextAttribute(byte _) { } }
 }
 
-namespace TowerLegacy;
+namespace TowerLegacy
+{
 
 // ── JSON POCO ────────────────────────────────────────────────────────────────
 public class TowerFractionJson
@@ -394,3 +395,5 @@ internal static class TowerDbInjector
         catch { return Enumerable.Empty<Type>(); }
     }
 }
+
+} // namespace TowerLegacy

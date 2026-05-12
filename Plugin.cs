@@ -29,8 +29,6 @@ public class Plugin : BasePlugin
     internal static Harmony Harmony;
     internal static bool DbInjected;
 
-    // Pointers of FractionLobbyAsset instances we created, so get_sid can
-    // return "tower" for them specifically.
     internal static readonly HashSet<IntPtr> TowerSlotPtrs = new HashSet<IntPtr>();
 
     public override void Load()
@@ -39,10 +37,7 @@ public class Plugin : BasePlugin
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
 
-        // Patch FractionLobbyAsset.get_sid so our injected slot reports "tower"
         PatchFlaGetSid();
-
-        // Patch the localization system so "tower_name" etc. resolve correctly
         PatchLocalization();
 
         Log.LogInfo("TowerLegacy loaded.");
@@ -56,10 +51,8 @@ public class Plugin : BasePlugin
             var getSid = typeof(FractionLobbyAsset).GetProperty("sid",
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetGetMethod(true);
             if (getSid == null)
-            {
                 getSid = typeof(FractionLobbyAsset).GetMethod("get_sid",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            }
             if (getSid == null) { Log.LogWarning("[SidPatch] FractionLobbyAsset.get_sid not found."); return; }
 
             Harmony.Patch(getSid, postfix: new HarmonyMethod(typeof(Plugin), nameof(GetSidPostfix)));
@@ -88,8 +81,6 @@ public class Plugin : BasePlugin
         { "tower_select", "Select Tower City" },
     };
 
-    // Known method names used by localization systems in obfuscated Unity IL2CPP games.
-    // We ONLY patch methods whose name matches one of these — never blind-scan all (string)->string.
     static readonly HashSet<string> LocMethodNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         "Get", "GetString", "GetText", "Translate", "Localize",
@@ -106,6 +97,8 @@ public class Plugin : BasePlugin
             if (hexAsm == null) { Log.LogWarning("[LocPatch] Hex assembly not found."); return; }
 
             int patched = 0;
+            var prefix = new HarmonyMethod(typeof(Plugin), nameof(LocPrefix));
+
             foreach (var type in hexAsm.GetTypes())
             {
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
@@ -113,42 +106,20 @@ public class Plugin : BasePlugin
                 {
                     try
                     {
-                        // Only target methods with a name that looks like a localization getter
-                        if (!LocMethodNames.Contains(m.Name)) continue;
                         if (m.ReturnType != typeof(string)) continue;
                         var parms = m.GetParameters();
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
 
-                        Harmony.Patch(m, prefix: new HarmonyMethod(typeof(Plugin), nameof(LocPrefix)));
+                        // Named loc methods OR short obfuscated names (≤6 chars)
+                        bool isNamed = LocMethodNames.Contains(m.Name);
+                        bool isObfuscated = m.Name.Length <= 6;
+                        if (!isNamed && !isObfuscated) continue;
+
+                        Harmony.Patch(m, prefix: prefix);
                         Log.LogInfo($"[LocPatch] Patched {type.FullName}.{m.Name}");
                         patched++;
                     }
                     catch { }
-                }
-            }
-
-            if (patched == 0)
-            {
-                Log.LogWarning("[LocPatch] No named loc methods found. Falling back to obfuscated scan (2-char names only).");
-                // Fallback: only patch short obfuscated-looking names (2-3 chars) — far fewer than 640
-                foreach (var type in hexAsm.GetTypes())
-                {
-                    foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
-                                                       BindingFlags.Instance | BindingFlags.Static))
-                    {
-                        try
-                        {
-                            if (m.Name.Length > 4) continue; // obfuscated names are short
-                            if (m.ReturnType != typeof(string)) return;
-                            var parms = m.GetParameters();
-                            if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
-
-                            Harmony.Patch(m, prefix: new HarmonyMethod(typeof(Plugin), nameof(LocPrefix)));
-                            Log.LogInfo($"[LocPatch] Patched (fallback) {type.FullName}.{m.Name}");
-                            patched++;
-                        }
-                        catch { }
-                    }
                 }
             }
 
@@ -158,23 +129,28 @@ public class Plugin : BasePlugin
     }
 
     /// <summary>
-    /// PREFIX — only fires when the key is one of our overrides.
-    /// Returns false to skip the original entirely (no Il2Cpp marshal on return path).
-    /// Returns true for everything else — original runs normally, zero overhead.
+    /// Prefix using raw IntPtr to avoid Il2CppStringToManagedIntPtr trampoline crash.
+    /// Accepting `string __0` forces Il2CppInterop to marshal EVERY incoming native
+    /// string pointer — including null/invalid ones — causing "Length cannot be less
+    /// than zero". Instead we take the raw pointer and only marshal when non-zero
+    /// and only when it matches one of our keys.
     /// </summary>
-    public static bool LocPrefix(string __0, ref string __result)
+    public static bool LocPrefix(IntPtr __0, ref string __result)
     {
         try
         {
-            if (__0 != null && LocOverrides.TryGetValue(__0, out var val))
+            if (__0 == IntPtr.Zero) return true;
+            // Marshal the native string pointer safely
+            var key = IL2CPP.Il2CppStringToManaged(__0);
+            if (key != null && LocOverrides.TryGetValue(key, out var val))
             {
-                Log.LogInfo($"[LocPatch] Intercepted key '{__0}' → '{val}'");
+                Log.LogInfo($"[LocPatch] Intercepted key '{key}' → '{val}'");
                 __result = val;
-                return false; // skip original — avoids marshal of native return ptr
+                return false; // skip original
             }
         }
         catch { }
-        return true; // let original run normally
+        return true;
     }
 }
 

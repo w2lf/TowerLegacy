@@ -28,24 +28,28 @@ public class Plugin : BasePlugin
     internal static new ManualLogSource Log;
     internal static Harmony Harmony;
     internal static bool DbInjected;
+    internal static bool SlotDumped;
 
     public override void Load()
     {
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
-        DumpAndPatchSlotSetters();
         Log.LogInfo("TowerLegacy loaded.");
     }
 
+    // Called from ScLobby2.Init postfix — by then Hex assembly is fully live.
     internal static void DumpAndPatchSlotSetters()
     {
+        if (SlotDumped) return;
+        SlotDumped = true;
         try
         {
             var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
                 .FirstOrDefault(a => a.GetName().Name == "Hex");
-            if (hexAsm == null) return;
+            if (hexAsm == null) { Log.LogWarning("[SlotDump] Hex asm not found."); return; }
 
+            int found = 0;
             foreach (var type in hexAsm.GetTypes())
             {
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
@@ -53,18 +57,19 @@ public class Plugin : BasePlugin
                     try
                     {
                         var parms = m.GetParameters();
-                        bool takesFla = parms.Any(p => p.ParameterType == typeof(FractionLobbyAsset));
-                        if (!takesFla) continue;
+                        if (!parms.Any(p => p.ParameterType == typeof(FractionLobbyAsset))) continue;
 
                         Log.LogInfo($"[SlotDump] {type.Name}.{m.Name}({string.Join(", ", parms.Select(p => p.ParameterType.Name + " " + p.Name))})");
+                        found++;
 
                         var postfix = new HarmonyMethod(typeof(Plugin), nameof(SlotSetterPostfix));
                         try { Harmony.Patch(m, postfix: postfix); }
-                        catch { /* skip unpatchable */ }
+                        catch (Exception pe) { Log.LogWarning($"[SlotDump] Could not patch {type.Name}.{m.Name}: {pe.Message}"); }
                     }
                     catch { }
                 }
             }
+            Log.LogInfo($"[SlotDump] Done. {found} method(s) found and patched.");
         }
         catch (Exception ex) { Log.LogWarning($"[SlotDump] Failed: {ex.Message}"); }
     }
@@ -78,21 +83,18 @@ public class Plugin : BasePlugin
             var methodName = new System.Diagnostics.StackFrame(1).GetMethod()?.Name ?? "?";
             Log.LogInfo($"[SlotCall] {typeName}.{methodName} sid={sid}");
 
-            // Dump TMP text components via reflection so we don't need the TMPro assembly reference.
             if (__instance != null)
             {
                 var go = TryGetGameObject(__instance);
                 if (go != null)
                 {
-                    // GetComponentsInChildren<Component> on the GameObject via Il2Cpp
                     try
                     {
-                        var goType   = go.GetType();
+                        var goType    = go.GetType();
                         var gciMethod = goType.GetMethods()
                             .FirstOrDefault(x => x.Name == "GetComponentsInChildren" && x.IsGenericMethod && x.GetParameters().Length == 0);
                         if (gciMethod != null)
                         {
-                            // Try to find TMP_Text or TextMeshProUGUI type in loaded assemblies
                             Type tmpType = null;
                             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                             {
@@ -101,17 +103,14 @@ public class Plugin : BasePlugin
                             }
                             if (tmpType != null)
                             {
-                                var generic = gciMethod.MakeGenericMethod(tmpType);
-                                var comps   = generic.Invoke(go, null) as System.Collections.IEnumerable;
+                                var comps = gciMethod.MakeGenericMethod(tmpType).Invoke(go, null) as System.Collections.IEnumerable;
                                 if (comps != null)
-                                {
                                     foreach (var comp in comps)
                                     {
                                         var name = comp.GetType().GetProperty("name")?.GetValue(comp)?.ToString() ?? "?";
                                         var text = comp.GetType().GetProperty("text")?.GetValue(comp)?.ToString() ?? "?";
                                         Log.LogInfo($"[SlotCall]   TMP '{name}' = \"{text}\"");
                                     }
-                                }
                             }
                         }
                     }
@@ -124,11 +123,7 @@ public class Plugin : BasePlugin
 
     static object TryGetGameObject(object instance)
     {
-        try
-        {
-            var p = instance.GetType().GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance);
-            return p?.GetValue(instance);
-        }
+        try { return instance.GetType().GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance)?.GetValue(instance); }
         catch { return null; }
     }
 }
@@ -142,6 +137,9 @@ public static class ScLobby2_Init_Patch
     {
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
+
+        // Defer dump to here so Hex types are fully resolved.
+        Plugin.DumpAndPatchSlotSetters();
     }
 }
 

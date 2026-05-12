@@ -31,6 +31,10 @@ public class Plugin : BasePlugin
 
     internal static readonly HashSet<IntPtr> TowerSlotPtrs = new HashSet<IntPtr>();
 
+    // Il2Cpp object-pool internals — must never be copied between instances
+    static readonly HashSet<string> _skipFields = new HashSet<string>(StringComparer.Ordinal)
+        { "pooledPtr", "isWrapped" };
+
     public override void Load()
     {
         Log = base.Log;
@@ -106,9 +110,6 @@ public class Plugin : BasePlugin
         { "tower_select", "Select Tower City" },
     };
 
-    // Patch as Prefix with `return false` on matched keys so the original method
-    // (and its Il2Cpp string marshaling) is never invoked for our keys — this
-    // prevents the OutOfMemoryException re-entrance loop that a Postfix caused.
     static void PatchLocalization()
     {
         try
@@ -149,8 +150,6 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
-    // Prefix: return false skips the original entirely for our keys,
-    // so no Il2Cpp string marshaling happens → no re-entrance → no OOM loop.
     public static bool LocPrefix(string __0, ref string __result)
     {
         try
@@ -159,11 +158,11 @@ public class Plugin : BasePlugin
             {
                 Log.LogInfo($"[LocPatch] Intercepted '{__0}' -> '{val}'");
                 __result = val;
-                return false; // skip original
+                return false;
             }
         }
         catch { }
-        return true; // let original run for everything else
+        return true;
     }
 }
 
@@ -226,17 +225,25 @@ public static class ScFractionSelect_qwa_Patch
     {
         var slot = new FractionLobbyAsset();
 
-        // Copy all fields
+        // Copy fields — skip Il2Cpp object-pool internals to prevent double-free crash
         foreach (var f in typeof(FractionLobbyAsset).GetFields(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            if (Plugin._skipFields.Contains(f.Name)) continue;
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
+        }
 
-        // Copy writable properties
+        // Copy writable properties (Sprite fields etc.) — skip pool-internal props
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            if (Plugin._skipFields.Contains(p.Name)) continue;
+            // Skip ObjectClass / Pointer / WasCollected — Il2Cpp object identity
+            if (p.Name is "ObjectClass" or "Pointer" or "WasCollected") continue;
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
+        }
 
-        // Try to set sid via every string field — log which fields hold "human" so we know the real name
+        // Override sid -> "tower"
         bool sidSet = false;
         foreach (var f in typeof(FractionLobbyAsset).GetFields(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
@@ -255,9 +262,15 @@ public static class ScFractionSelect_qwa_Patch
             catch { }
         }
 
+        // Try sid property if field override didn't work
         if (!sidSet)
         {
-            // Register ptr fallback
+            try { slot.sid = "tower"; sidSet = true; Plugin.Log.LogInfo("[TowerInject] Set sid property -> 'tower'"); }
+            catch { }
+        }
+
+        if (!sidSet)
+        {
             var slotPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(slot);
             Plugin.TowerSlotPtrs.Add(slotPtr);
             Plugin.Log.LogInfo($"[TowerInject] No 'human' string field found; ptr registered 0x{slotPtr:X}");

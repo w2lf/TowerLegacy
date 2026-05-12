@@ -33,8 +33,7 @@ public class Plugin : BasePlugin
     {
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
-        Harmony.PatchAll();                          // standard attribute patches
-        LocalizationPatch.Apply(Harmony);            // manual scan-and-patch for loc methods
+        Harmony.PatchAll();
         Log.LogInfo("TowerLegacy loaded.");
     }
 }
@@ -43,90 +42,10 @@ public class Plugin : BasePlugin
 internal static class TowerFaction
 {
     public const string Id           = "tower";
-    public const string DisplayName  = "Tower City";
-    public const string Desc         = "Masters of stone and sorcery, the Tower City mages command arcane constructs and disciplined soldiers.";
-    public const string NarrativeDesc= "From their obsidian spires, the Tower City sages watch the horizon for enemies who dare challenge their dominion.";
     public const string IconKey      = "fraction_human";
     public const string Biome        = "Snow";
-    public const string CityKey      = "human_city";
     public const string ResourceName = "crystals";
-    public static readonly string[] Heroes    = { };
-    public static readonly string[] CityNames =
-    {
-        "Arcantum", "Spire's Edge", "Vorath Keep", "Crystalhold",
-        "Ebonveil", "The Bastion", "Coldforge", "Mirethian",
-    };
-
-    public const string KeyName          = "tower_name";
-    public const string KeyDesc          = "tower_desc";
-    public const string KeyNarrativeDesc = "tower_narrative_desc";
-    public const string KeyCity          = "tower_city";
-
-    public static bool TryGetLocalized(string key, out string value)
-    {
-        switch (key)
-        {
-            case KeyName:          value = DisplayName;   return true;
-            case KeyDesc:          value = Desc;          return true;
-            case KeyNarrativeDesc: value = NarrativeDesc; return true;
-            case KeyCity:          value = "Tower City";  return true;
-            default:               value = null;          return false;
-        }
-    }
-}
-
-// ── LOCALIZATION INTERCEPT (manual patch, NOT [HarmonyPatch]) ────────────────────────
-public static class LocalizationPatch
-{
-    static readonly HarmonyMethod _postfix =
-        new HarmonyMethod(typeof(LocalizationPatch), nameof(Postfix));
-
-    static readonly string[] CandidateNames =
-        { "Get", "GetString", "Translate", "GetText", "Localize" };
-
-    public static void Apply(Harmony harmony)
-    {
-        var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
-            .FirstOrDefault(a => a.GetName().Name == "Hex");
-        if (hexAsm == null)
-        {
-            Plugin.Log.LogWarning("[TowerLoc] Hex assembly not found, skipping loc patch.");
-            return;
-        }
-
-        int count = 0;
-        foreach (var type in hexAsm.GetTypes())
-        {
-            foreach (var name in CandidateNames)
-            {
-                try
-                {
-                    var m = type.GetMethod(name,
-                        BindingFlags.Public | BindingFlags.NonPublic |
-                        BindingFlags.Static | BindingFlags.Instance,
-                        null, new[] { typeof(string) }, null);
-
-                    if (m == null || m.ReturnType != typeof(string)) continue;
-
-                    harmony.Patch(m, postfix: _postfix);
-                    count++;
-                    Plugin.Log.LogInfo($"[TowerLoc] Patched {type.Name}.{name}");
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.LogWarning($"[TowerLoc] Could not patch {type.Name}.{name}: {ex.Message}");
-                }
-            }
-        }
-        Plugin.Log.LogInfo($"[TowerLoc] Patched {count} localization method(s).");
-    }
-
-    // Postfix signature: __0 = first param (the key), __result = return value
-    static void Postfix(string __0, ref string __result)
-    {
-        if (__0 != null && TowerFaction.TryGetLocalized(__0, out var v))
-            __result = v;
-    }
+    public static readonly string[] Heroes = { };   // empty = inherit human's heroes
 }
 
 // ── PATCHES ───────────────────────────────────────────────────────────────────
@@ -183,22 +102,16 @@ public static class ScFractionSelect_qwa_Patch
             if (dictObjPtr != IntPtr.Zero)
             {
                 var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
-                if (!dict.ContainsKey(TowerFaction.Id))
-                {
-                    dict.Add(TowerFaction.Id, slot);
-                    Plugin.Log.LogInfo($"[TowerInject] Added tower to dict_ (now {dict.Count} entries).");
-                }
-                else
-                    Plugin.Log.LogInfo($"[TowerInject] dict_ already has tower ({dict.Count} entries).");
+                Plugin.Log.LogInfo($"[TowerInject] dict_ has {dict.Count} entries, skipping tower key insert.");
             }
-            else Plugin.Log.LogWarning("[TowerInject] dict_ ptr is zero.");
 
             _injectedQwa = true;
-            Plugin.Log.LogInfo($"[TowerInject] Injected tower slot (sid={TowerFaction.Id}) into SoFractions.");
+            Plugin.Log.LogInfo("[TowerInject] Injected tower slot (sid=human) into SoFractions.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
 
+    // sid stays "human" so all UI dict lookups and LocKit keys keep resolving correctly.
     internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src)
     {
         var slot = new FractionLobbyAsset();
@@ -206,7 +119,7 @@ public static class ScFractionSelect_qwa_Patch
             try { f.SetValue(slot, f.GetValue(src)); } catch { }
         foreach (var p in typeof(FractionLobbyAsset).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
             try { if (p.CanRead && p.CanWrite) p.SetValue(slot, p.GetValue(src)); } catch { }
-        slot.sid = TowerFaction.Id;
+        slot.sid = "human";
         return slot;
     }
 }
@@ -231,7 +144,7 @@ public static class ScFractionSelect_qwb_Patch
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
             __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
-            Plugin.Log.LogInfo($"[TowerInject] Injected UI slot via qwb (sid={TowerFaction.Id}).");
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=human).");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }
@@ -275,25 +188,28 @@ internal static class TowerDbInjector
             foreach (var p in typeof(FractionConfig).GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 try { if (p.CanRead && p.CanWrite) p.SetValue(tower, p.GetValue(humanCfg)); } catch { }
 
-            tower.id            = TowerFaction.Id;
-            tower.name          = TowerFaction.KeyName;
-            tower.desc          = TowerFaction.KeyDesc;
-            tower.narrativeDesc = TowerFaction.KeyNarrativeDesc;
-            tower.icon          = TowerFaction.IconKey;
-            tower.biome         = TowerFaction.Biome;
-            tower.city          = TowerFaction.CityKey;
-            tower.resourceName  = TowerFaction.ResourceName;
+            // ── Overrides ─────────────────────────────────────────────────────
+            tower.id           = TowerFaction.Id;
+            // Keep human's loc keys for name/desc/city so LocKit doesn't break.
+            // We'll patch the display text in a later step once we find the right widget.
+            tower.icon         = TowerFaction.IconKey;
+            tower.biome        = TowerFaction.Biome;
+            tower.resourceName = TowerFaction.ResourceName;
 
+            // Hard-copy cityNames from human so the array is never null.
             var cities = new Il2CppCollections.List<string>();
-            foreach (var cn in TowerFaction.CityNames) cities.Add(cn);
+            if (humanCfg.cityNames != null)
+                for (int i = 0; i < humanCfg.cityNames.Count; i++)
+                    cities.Add(humanCfg.cityNames[i]);
+            if (cities.Count == 0) cities.Add("Tower City");
             tower.cityNames = cities;
 
-            if (TowerFaction.Heroes.Length > 0)
-            {
-                var heroes = new Il2CppCollections.List<string>();
-                foreach (var h in TowerFaction.Heroes) heroes.Add(h);
-                tower.heroes = heroes;
-            }
+            // Hard-copy heroes from human so the array is never null.
+            var heroes = new Il2CppCollections.List<string>();
+            if (humanCfg.heroes != null)
+                for (int i = 0; i < humanCfg.heroes.Count; i++)
+                    heroes.Add(humanCfg.heroes[i]);
+            tower.heroes = heroes;
 
             Plugin.Log.LogInfo($"[TowerInject] tower cloned, id={tower.id}");
 

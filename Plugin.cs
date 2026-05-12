@@ -339,15 +339,23 @@ public static class ScFractionSelect_qwb_Patch
                 if (__result[i]?.sid == "human") { src = __result[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
-            __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src));
+            var newSlot = ScFractionSelect_qwa_Patch.BuildSlot(src);
 
-            // TrimExcess forces the IL2CPP List to synchronise its internal
-            // backing array length with Count, preventing the ArgumentNullException
-            // that occurs when Unity reads the raw array immediately after Add().
-            try { __result.TrimExcess(); } catch { }
+            // Rebuild the list's internal backing array via Il2CppReferenceArray
+            // to avoid ArgumentNullException from IL2CPP array internals after Add().
+            int oldCount = __result.Count;
+            var newArr = new Il2CppReferenceArray<FractionLobbyAsset>(oldCount + 1);
+            for (int i = 0; i < oldCount; i++)
+                newArr[i] = __result[i];
+            newArr[oldCount] = newSlot;
+
+            // Clear and re-populate the list from the safe array copy.
+            __result.Clear();
+            for (int i = 0; i < newArr.Length; i++)
+                __result.Add(newArr[i]);
 
             _lobbyInjected = true;
-            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb.");
+            Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (array-rebuild path).");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwb failed: {ex}"); }
     }

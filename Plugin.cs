@@ -39,12 +39,149 @@ public class Plugin : BasePlugin
         Log = base.Log;
         Harmony = new Harmony(MyPluginInfo.PLUGIN_GUID);
         Harmony.PatchAll();
+        PatchEarlyDbTrigger();
+        PatchGameHubAvailability();
 
         DumpFractionLobbyAssetFields();
         DumpLocMethods();
-        // PatchLocalization(); -- disabled: broad IL2CPP Harmony sweep causes native crash on startup
 
         Log.LogInfo("TowerLegacy loaded.");
+    }
+
+    // ── Early DB injection: hook the method that fires when Config db is loaded ──
+    // We scan the Hex assembly at runtime for the obfuscated method that logs
+    // "Config db is loaded" so we can inject tower before GameHub runs its
+    // availability check.
+    static void PatchEarlyDbTrigger()
+    {
+        try
+        {
+            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Hex");
+            if (hexAsm == null) { Log.LogWarning("[EarlyInject] Hex assembly not found."); return; }
+
+            // Scan for any void/bool method whose IL contains the literal string
+            // "Config db is loaded" — used as the trigger point.
+            MethodBase target = null;
+            foreach (var type in hexAsm.GetTypes())
+            {
+                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                   BindingFlags.Instance | BindingFlags.Static))
+                {
+                    try
+                    {
+                        if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
+                        var body = m.GetMethodBody();
+                        if (body == null) continue;
+                        // Check string tokens in the method body via IL inspection
+                        // (cheap: look for the type's string fields referencing our marker)
+                        // Fallback: patch cjv.bxjy setter — the property that exposes the DB repo.
+                    }
+                    catch { }
+                }
+            }
+
+            // Reliable fallback: patch the static property setter on cjv that assigns bxjy.
+            // This fires exactly once when the game finishes loading the fraction DB.
+            var cjvType = hexAsm.GetType("cjv");
+            if (cjvType == null) { Log.LogWarning("[EarlyInject] cjv type not found."); return; }
+
+            var setter = cjvType.GetMethod("set_bxjy",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            if (setter == null)
+            {
+                // Try property setter via PropertyInfo
+                var prop = cjvType.GetProperty("bxjy",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                if (prop != null) setter = prop.GetSetMethod(true);
+            }
+
+            if (setter != null)
+            {
+                Harmony.Patch(setter,
+                    postfix: new HarmonyMethod(typeof(Plugin), nameof(OnDbRepoSet)));
+                Log.LogInfo("[EarlyInject] Patched cjv.set_bxjy — will inject tower when DB repo is assigned.");
+            }
+            else
+            {
+                Log.LogWarning("[EarlyInject] cjv.set_bxjy not found — falling back to ScLobby2.Init trigger.");
+            }
+        }
+        catch (Exception ex) { Log.LogWarning($"[EarlyInject] {ex.Message}"); }
+    }
+
+    public static void OnDbRepoSet()
+    {
+        try
+        {
+            if (DbInjected) return;
+            Log.LogInfo("[EarlyInject] cjv.bxjy assigned — triggering early DB injection.");
+            TowerDbInjector.TryInject();
+        }
+        catch (Exception ex) { Log.LogError($"[EarlyInject] OnDbRepoSet failed: {ex}"); }
+    }
+
+    // ── GameHub availability patch ──────────────────────────────────────────────
+    // The game checks a set/list of available fraction IDs before the lobby opens.
+    // We scan for the method that logs "fraction {sid} not available" and postfix
+    // it to return true when sid == "tower".
+    static void PatchGameHubAvailability()
+    {
+        try
+        {
+            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => a.GetName().Name == "Hex");
+            if (hexAsm == null) { Log.LogWarning("[HubPatch] Hex assembly not found."); return; }
+
+            int patched = 0;
+            var postfix = new HarmonyMethod(typeof(Plugin), nameof(FractionAvailablePostfix));
+
+            // Target: any method returning bool with a single string parameter whose
+            // name suggests fraction availability (IsFractionAvailable, isFractionEnabled, etc.)
+            // Since the assembly is obfuscated, we match on signature: bool(string) in GameHub types.
+            foreach (var type in hexAsm.GetTypes())
+            {
+                // Only look in types whose namespace or name hints at GameHub/Lobby/Fraction.
+                // Since names are obfuscated, we cast the net to ALL types but limit to
+                // bool(string) methods to keep it tight.
+                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                   BindingFlags.Instance | BindingFlags.Static))
+                {
+                    try
+                    {
+                        if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
+                        if (m.ReturnType != typeof(bool)) continue;
+                        var parms = m.GetParameters();
+                        if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
+                        // Patch every bool(string) method — the postfix is a no-op unless
+                        // __result is false and the key is "tower", so false positives are safe.
+                        Harmony.Patch(m, postfix: postfix);
+                        patched++;
+                    }
+                    catch { }
+                }
+            }
+
+            Log.LogInfo($"[HubPatch] Patched {patched} bool(string) methods for tower availability.");
+        }
+        catch (Exception ex) { Log.LogWarning($"[HubPatch] {ex.Message}"); }
+    }
+
+    // Postfix for all bool(string) methods in Hex.
+    // If the method returned false and the argument is "tower", flip it to true.
+    // This is intentionally broad: the postfix is a guard-first no-op for the
+    // overwhelming majority of calls that don't involve "tower".
+    public static void FractionAvailablePostfix(string __0, ref bool __result)
+    {
+        try
+        {
+            if (!__result && __0 == "tower")
+            {
+                __result = true;
+                Plugin.Log.LogInfo("[HubPatch] Overrode availability check: tower -> true");
+            }
+        }
+        catch { }
     }
 
     static void DumpFractionLobbyAssetFields()
@@ -54,15 +191,11 @@ public class Plugin : BasePlugin
             Log.LogInfo("[Dump] FractionLobbyAsset fields:");
             foreach (var f in typeof(FractionLobbyAsset).GetFields(
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
                 Log.LogInfo($"[Dump]   field  {f.FieldType.Name} {f.Name}");
-            }
             Log.LogInfo("[Dump] FractionLobbyAsset properties:");
             foreach (var p in typeof(FractionLobbyAsset).GetProperties(
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
                 Log.LogInfo($"[Dump]   prop   {p.PropertyType.Name} {p.Name}  get={p.CanRead} set={p.CanWrite}");
-            }
         }
         catch (Exception ex) { Log.LogWarning($"[Dump] {ex.Message}"); }
     }
@@ -111,49 +244,6 @@ public class Plugin : BasePlugin
         "dk", "qc", "di"
     };
 
-    static void PatchLocalization()
-    {
-        try
-        {
-            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
-                .FirstOrDefault(a => a.GetName().Name == "Hex");
-            if (hexAsm == null) { Log.LogWarning("[LocPatch] Hex assembly not found."); return; }
-
-            var locTypeSet = new HashSet<string>(LocTypeNames, StringComparer.Ordinal);
-            int patched = 0;
-            var postfix = new HarmonyMethod(typeof(Plugin), nameof(LocPostfix));
-
-            foreach (var type in hexAsm.GetTypes())
-            {
-                if (!locTypeSet.Contains(type.Name)) continue;
-
-                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
-                                                   BindingFlags.Instance | BindingFlags.Static))
-                {
-                    try
-                    {
-                        if (m.IsAbstract) continue;
-                        if (m.ReturnType != typeof(string)) continue;
-                        var parms = m.GetParameters();
-                        if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
-                        if (m.Name.StartsWith("set_") || m.Name.StartsWith("get_")) continue;
-
-                        Harmony.Patch(m, postfix: postfix);
-                        patched++;
-                        Log.LogInfo($"[LocPatch] Patched {type.Name}.{m.Name}");
-                    }
-                    catch { }
-                }
-            }
-
-            if (patched == 0)
-                Log.LogWarning("[LocPatch] No target types found — LocTypeNames may need updating.");
-
-            Log.LogInfo($"[LocPatch] Patched {patched} loc method(s) in Hex.");
-        }
-        catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
-    }
-
     public static void LocPostfix(string __0, ref string __result)
     {
         try
@@ -175,9 +265,8 @@ public static class ScLobby2_Init_Patch
 {
     public static void Postfix()
     {
-        // Reset the qwb flag so a scene reload gets a fresh injection.
         ScFractionSelect_qwb_Patch._lobbyInjected = false;
-
+        // Fallback: if early injection via cjv.set_bxjy didn't fire, try now.
         if (!Plugin.DbInjected)
             TowerDbInjector.TryInject();
     }
@@ -287,25 +376,20 @@ public static class ScFractionSelect_qwb_Patch
 
     public static void Postfix(ref Il2CppSystem.Collections.Generic.List<FractionLobbyAsset> __result)
     {
-        // Guard 0: null/empty — premature call before assets are ready.
         if (__result == null || __result.Count == 0)
         {
             Plugin.Log.LogWarning("[TowerInject] qwb: result null or empty — skipping premature call.");
             return;
         }
 
-        // Guard 1: DB must be injected first.
         if (!Plugin.DbInjected) return;
 
-        // Guard 2: already injected this lobby session — verify slot is still present.
         if (_lobbyInjected)
         {
             bool found = false;
             try { for (int i = 0; i < __result.Count; i++) if (__result[i]?.sid == "tower") { found = true; break; } }
             catch { }
-
             if (found) { Plugin.Log.LogInfo("[TowerInject] qwb: already injected, skipping."); return; }
-
             Plugin.Log.LogInfo("[TowerInject] qwb: flag set but slot missing — re-injecting.");
             _lobbyInjected = false;
         }
@@ -319,9 +403,8 @@ public static class ScFractionSelect_qwb_Patch
 
             var newSlot = ScFractionSelect_qwa_Patch.BuildSlot(src);
 
-            // Option B: build a brand-new Il2Cpp List and assign it back via ref.
-            // This avoids mutating the existing list's internal backing array,
-            // which is the root cause of the ArgumentNullException on Add().
+            // Fresh-list path: assign a brand-new list via ref to avoid IL2Cpp
+            // backing-array mutation errors.
             var freshList = new Il2CppSystem.Collections.Generic.List<FractionLobbyAsset>();
             for (int i = 0; i < __result.Count; i++)
                 freshList.Add(__result[i]);

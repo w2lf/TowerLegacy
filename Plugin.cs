@@ -36,6 +36,30 @@ public class Plugin : BasePlugin
         Harmony.PatchAll();
         Log.LogInfo("TowerLegacy loaded.");
     }
+
+    // Walk full inheritance chain and dump all fields + readable properties.
+    internal static void DumpObject(string label, object obj)
+    {
+        if (obj == null) { Log.LogInfo($"[Dump] {label} = null"); return; }
+        Log.LogInfo($"[Dump] ===== {label} ({obj.GetType().FullName}) =====");
+        var t = obj.GetType();
+        while (t != null && t != typeof(object))
+        {
+            foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                try { Log.LogInfo($"[Dump]  F {f.DeclaringType?.Name}.{f.Name} : {f.FieldType.Name} = {f.GetValue(obj)}"); }
+                catch (Exception ex) { Log.LogInfo($"[Dump]  F {f.DeclaringType?.Name}.{f.Name} : {f.FieldType.Name} = <err:{ex.GetType().Name}>"); }
+            }
+            foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            {
+                if (!p.CanRead) continue;
+                try { Log.LogInfo($"[Dump]  P {p.DeclaringType?.Name}.{p.Name} : {p.PropertyType.Name} = {p.GetValue(obj)}"); }
+                catch (Exception ex) { Log.LogInfo($"[Dump]  P {p.DeclaringType?.Name}.{p.Name} : {p.PropertyType.Name} = <err:{ex.GetType().Name}>"); }
+            }
+            t = t.BaseType;
+        }
+        Log.LogInfo($"[Dump] ===== end {label} =====");
+    }
 }
 
 // ── PATCHES ───────────────────────────────────────────────────────────────────
@@ -53,6 +77,8 @@ public static class ScLobby2_Init_Patch
 [HarmonyPatch(typeof(ScFractionSelect), nameof(ScFractionSelect.qwa))]
 public static class ScFractionSelect_qwa_Patch
 {
+    internal static bool _injectedQwa = false;
+
     public static void Prefix(ScFractionSelect __instance)
     {
         try
@@ -67,10 +93,6 @@ public static class ScFractionSelect_qwa_Patch
             if (arrObjPtr == IntPtr.Zero) { Plugin.Log.LogWarning("[TowerInject] fractions ptr zero."); return; }
 
             var arr = new Il2CppReferenceArray<FractionLobbyAsset>(arrObjPtr);
-
-            // Check by index position instead of sid to avoid duplicate-check issues.
-            // If we already have more entries than the game's original count, skip.
-            // We track via a static flag instead.
             if (_injectedQwa) return;
 
             FractionLobbyAsset src = null;
@@ -78,7 +100,9 @@ public static class ScFractionSelect_qwa_Patch
                 if (arr[i]?.sid == "human") { src = arr[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human slot not found."); return; }
 
-            // Keep sid=human so no downstream dict lookup for "tower" is triggered.
+            // Dump FractionLobbyAsset fields once so we know what to override.
+            Plugin.DumpObject("FractionLobbyAsset(human)", src);
+
             var slot   = BuildSlot(src, keepSid: true);
             var newArr = new Il2CppReferenceArray<FractionLobbyAsset>(arr.Length + 1);
             for (int i = 0; i < arr.Length; i++) newArr[i] = arr[i];
@@ -90,32 +114,22 @@ public static class ScFractionSelect_qwa_Patch
                 IL2CPP.Il2CppObjectBaseToPtrNotNull(newArr));
             Plugin.Log.LogInfo("[TowerInject] fractions array updated.");
 
-            // Log all fields of FractionLobbyAsset so we can see what sid/name fields exist.
-            Plugin.Log.LogInfo("[TowerInject] FractionLobbyAsset fields:");
-            foreach (var f in typeof(FractionLobbyAsset).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
-            {
-                try { Plugin.Log.LogInfo($"[TowerInject]   {f.FieldType.Name} {f.Name} = {f.GetValue(slot)}"); }
-                catch { Plugin.Log.LogInfo($"[TowerInject]   {f.FieldType.Name} {f.Name} = <error>"); }
-            }
-
             var dictFieldPtr = IL2CPP.GetIl2CppField(soClassPtr, "dict_");
             var dictObjPtr   = IL2CPP.il2cpp_field_get_value_object(dictFieldPtr, objPtr);
             if (dictObjPtr != IntPtr.Zero)
             {
                 var dict = new Il2CppSystem.Collections.Generic.Dictionary<string, FractionLobbyAsset>(dictObjPtr);
-                // Don't add "tower" key — we're keeping sid=human to avoid KeyNotFound.
-                // Add a second "human" entry under a dummy key only if needed later.
-                Plugin.Log.LogInfo($"[TowerInject] dict_ has {dict.Count} entries, skipping tower key insert.");
+                Plugin.Log.LogInfo($"[TowerInject] dict_ keys: {string.Join(", ", Enumerable.Range(0, dict.Count).Select(i => "(iterating)"))}");
+                // Just log count for now.
+                Plugin.Log.LogInfo($"[TowerInject] dict_ has {dict.Count} entries.");
             }
-            else Plugin.Log.LogWarning("[TowerInject] dict_ is null, skipping.");
+            else Plugin.Log.LogWarning("[TowerInject] dict_ is null.");
 
             _injectedQwa = true;
             Plugin.Log.LogInfo("[TowerInject] Injected tower slot (sid=human) into SoFractions.");
         }
         catch (Exception ex) { Plugin.Log.LogError($"[TowerInject] qwa prefix failed: {ex}"); }
     }
-
-    internal static bool _injectedQwa = false;
 
     internal static FractionLobbyAsset BuildSlot(FractionLobbyAsset src, bool keepSid = false)
     {
@@ -139,7 +153,6 @@ public static class ScFractionSelect_qwb_Patch
         try
         {
             if (__result == null || __result.Count == 0) return;
-
             var listPtr = IL2CPP.Il2CppObjectBaseToPtrNotNull(__result);
             if (_injected.Contains(listPtr)) return;
             _injected.Add(listPtr);
@@ -149,7 +162,6 @@ public static class ScFractionSelect_qwb_Patch
                 if (__result[i]?.sid == "human") { src = __result[i]; break; }
             if (src == null) { Plugin.Log.LogWarning("[TowerInject] human not found (qwb)."); return; }
 
-            // Keep sid=human — no tower key needed yet.
             __result.Add(ScFractionSelect_qwa_Patch.BuildSlot(src, keepSid: true));
             Plugin.Log.LogInfo("[TowerInject] Injected UI slot via qwb (sid=human).");
         }
@@ -185,13 +197,8 @@ internal static class TowerDbInjector
             if (humanCfg == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
             Plugin.Log.LogInfo($"[TowerInject] human ok, id={humanCfg.id}");
 
-            // Log FractionConfig fields so we know what to override later.
-            Plugin.Log.LogInfo("[TowerInject] FractionConfig fields:");
-            foreach (var f in typeof(FractionConfig).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
-            {
-                try { Plugin.Log.LogInfo($"[TowerInject]   {f.FieldType.Name} {f.Name} = {f.GetValue(humanCfg)}"); }
-                catch { Plugin.Log.LogInfo($"[TowerInject]   {f.FieldType.Name} {f.Name} = <error>"); }
-            }
+            // Deep dump FractionConfig so we know every field name.
+            Plugin.DumpObject("FractionConfig(human)", humanCfg);
 
             if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }

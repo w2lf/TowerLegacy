@@ -11,8 +11,6 @@ using Hex.GameHub.Lobby.UI;
 using Hex.GameHub.UICommon;
 using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
-using UnityEngine.UI;
-using TMPro;
 using Il2CppCollections = Il2CppSystem.Collections.Generic;
 
 namespace System.Runtime.CompilerServices
@@ -40,9 +38,6 @@ public class Plugin : BasePlugin
         Log.LogInfo("TowerLegacy loaded.");
     }
 
-    // Find every method in ScFractionSlot (the individual card) that takes a
-    // FractionLobbyAsset and patch it so we can see which one writes the name.
-    static bool _slotDumped = false;
     internal static void DumpAndPatchSlotSetters()
     {
         try
@@ -51,7 +46,6 @@ public class Plugin : BasePlugin
                 .FirstOrDefault(a => a.GetName().Name == "Hex");
             if (hexAsm == null) return;
 
-            // Dump all types that touch FractionLobbyAsset in their methods.
             foreach (var type in hexAsm.GetTypes())
             {
                 foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
@@ -64,7 +58,6 @@ public class Plugin : BasePlugin
 
                         Log.LogInfo($"[SlotDump] {type.Name}.{m.Name}({string.Join(", ", parms.Select(p => p.ParameterType.Name + " " + p.Name))})");
 
-                        // Patch it with a postfix that logs the sid of the asset passed.
                         var postfix = new HarmonyMethod(typeof(Plugin), nameof(SlotSetterPostfix));
                         try { Harmony.Patch(m, postfix: postfix); }
                         catch { /* skip unpatchable */ }
@@ -76,8 +69,6 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[SlotDump] Failed: {ex.Message}"); }
     }
 
-    // Generic postfix: logs which method was called and the sid of the asset.
-    // __instance may be null for static methods.
     public static void SlotSetterPostfix(object __instance, FractionLobbyAsset __0)
     {
         try
@@ -87,18 +78,58 @@ public class Plugin : BasePlugin
             var methodName = new System.Diagnostics.StackFrame(1).GetMethod()?.Name ?? "?";
             Log.LogInfo($"[SlotCall] {typeName}.{methodName} sid={sid}");
 
-            // Also dump all TMP_Text children so we can see what text is set.
+            // Dump TMP text components via reflection so we don't need the TMPro assembly reference.
             if (__instance != null)
             {
-                var go = (__instance as UnityEngine.MonoBehaviour)?.gameObject;
+                var go = TryGetGameObject(__instance);
                 if (go != null)
                 {
-                    foreach (var tmp in go.GetComponentsInChildren<TextMeshProUGUI>())
-                        Log.LogInfo($"[SlotCall]   TMP '{tmp.name}' = \"{tmp.text}\"");
+                    // GetComponentsInChildren<Component> on the GameObject via Il2Cpp
+                    try
+                    {
+                        var goType   = go.GetType();
+                        var gciMethod = goType.GetMethods()
+                            .FirstOrDefault(x => x.Name == "GetComponentsInChildren" && x.IsGenericMethod && x.GetParameters().Length == 0);
+                        if (gciMethod != null)
+                        {
+                            // Try to find TMP_Text or TextMeshProUGUI type in loaded assemblies
+                            Type tmpType = null;
+                            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                            {
+                                tmpType = asm.GetType("TMPro.TMP_Text") ?? asm.GetType("TMPro.TextMeshProUGUI");
+                                if (tmpType != null) break;
+                            }
+                            if (tmpType != null)
+                            {
+                                var generic = gciMethod.MakeGenericMethod(tmpType);
+                                var comps   = generic.Invoke(go, null) as System.Collections.IEnumerable;
+                                if (comps != null)
+                                {
+                                    foreach (var comp in comps)
+                                    {
+                                        var name = comp.GetType().GetProperty("name")?.GetValue(comp)?.ToString() ?? "?";
+                                        var text = comp.GetType().GetProperty("text")?.GetValue(comp)?.ToString() ?? "?";
+                                        Log.LogInfo($"[SlotCall]   TMP '{name}' = \"{text}\"");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch { }
                 }
             }
         }
         catch { }
+    }
+
+    static object TryGetGameObject(object instance)
+    {
+        try
+        {
+            var p = instance.GetType().GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance);
+            return p?.GetValue(instance);
+        }
+        catch { return null; }
     }
 }
 
@@ -246,7 +277,6 @@ internal static class TowerDbInjector
             tower.biome        = "Snow";
             tower.resourceName = "crystals";
 
-            // Hard-copy cityNames
             var cities = new Il2CppCollections.List<string>();
             if (humanCfg.cityNames != null)
                 for (int i = 0; i < humanCfg.cityNames.Count; i++)
@@ -254,7 +284,6 @@ internal static class TowerDbInjector
             if (cities.Count == 0) cities.Add("Tower City");
             tower.cityNames = cities;
 
-            // Hard-copy heroes
             var heroes = new Il2CppCollections.List<string>();
             if (humanCfg.heroes != null)
                 for (int i = 0; i < humanCfg.heroes.Count; i++)

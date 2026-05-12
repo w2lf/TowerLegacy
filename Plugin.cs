@@ -118,20 +118,13 @@ public static class FractionConfig_get_name_Patch
     }
 }
 
-// Patch the localization system — the game resolves faction names through
-// a loc key like "LOC:human_name". We intercept the translate call and
-// return "Tower" whenever the tower FractionConfig is requesting its name.
-// This covers cases where get_Name/get_name patches don't fire.
+// Safety net: patch the localization Translate method to intercept the tower
+// faction name if get_Name/get_name patches don't fire.
 [HarmonyPatch]
 public static class LocalizationTranslate_Patch
 {
-    static bool prepared = false;
-    static MethodBase target = null;
-
     static MethodBase TargetMethod()
     {
-        // Find any static/instance method named Translate or Get that takes
-        // a single string and returns a string inside a Localization-related type.
         foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
         {
             foreach (var t in TrySafeGetTypes(asm))
@@ -164,19 +157,9 @@ public static class LocalizationTranslate_Patch
 
     public static void Postfix(string __0, ref string __result)
     {
-        // If the result still looks like an unresolved LOC key for human name,
-        // and we have a tower faction in the DB, override to "Tower".
-        try
-        {
-            if (__result != null && __result.Contains("human") && __result.ToLower().Contains("name"))
-                return; // not our concern — only intercept if needed
-
-            // Key coming in is something like "LOC:human_name" — result would be "Temple" or "Human"
-            // We can't know the exact key but we know: if the result equals the human faction name
-            // and the caller context is tower, we want "Tower". We handle this via the
-            // FractionConfig field patch below instead — this method is a safety net.
-        }
-        catch { }
+        // Safety net only — TryNullNameField + get_Name patches handle naming.
+        // Nothing to do here unless those fail.
+        _ = __0;
     }
 }
 
@@ -235,9 +218,6 @@ internal static class TowerDbInjector
 
             CopyAllFields(fractionType, human, tower);
             SetId(tower, "tower");
-
-            // Also try to null out the name localization field so the game
-            // can't fall back to Human's localized name string.
             TryNullNameField(tower, fractionType);
 
             AddToList(listObj, tower);
@@ -260,10 +240,6 @@ internal static class TowerDbInjector
 
     static void CopyAllFields(Type rootType, object src, object dst)
     {
-        // Skip:
-        //   1. name/desc/narrativeDesc — shared localization reference objects
-        //   2. Any array or ICollection field — IL2CPP arrays cannot be safely
-        //      pointer-copied; they cause ArgumentNullException: array at runtime
         var skipNames = new HashSet<string>
         {
             "name", "Name", "_name",
@@ -277,7 +253,6 @@ internal static class TowerDbInjector
             {
                 if (skipNames.Contains(f.Name)) continue;
 
-                // Skip arrays and collection types
                 var ft = f.FieldType;
                 if (ft.IsArray) continue;
                 if (typeof(ICollection).IsAssignableFrom(ft)) continue;
@@ -288,22 +263,16 @@ internal static class TowerDbInjector
                         gtd == typeof(HashSet<>) || gtd == typeof(Queue<>))
                         continue;
                 }
-                // Also skip IL2Cpp list/array types by name
                 var ftn = ft.FullName ?? "";
                 if (ftn.Contains("Il2CppSystem.Collections") || ftn.Contains("Il2CppInterop"))
                     continue;
 
-                try
-                {
-                    f.SetValue(dst, f.GetValue(src));
-                }
+                try { f.SetValue(dst, f.GetValue(src)); }
                 catch { }
             }
         }
     }
 
-    // Attempt to set the name localization field to null or empty so the
-    // game won't resolve it to Human's name via the loc system.
     static void TryNullNameField(object cfg, Type rootType)
     {
         foreach (var t in GetTypeChain(rootType))
@@ -321,8 +290,6 @@ internal static class TowerDbInjector
                         Plugin.Log.LogInfo($"[TowerInject] Set string name field '{fname}' = Tower");
                         return;
                     }
-                    // If it's a reference type (loc key object), set to null —
-                    // Harmony get_Name patch will supply the final string.
                     if (!f.FieldType.IsValueType)
                     {
                         f.SetValue(cfg, null);

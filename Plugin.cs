@@ -38,8 +38,7 @@ public class Plugin : BasePlugin
     internal static Harmony Harmony;
     internal static bool DbInjected;
 
-    // The display name used everywhere as a hard fallback
-    internal const string TowerDisplayName = "Tower City";
+    internal const string TowerDisplayName = "Tower";
 
     public override void Load()
     {
@@ -97,8 +96,9 @@ public static class ScFractionSelect_qwb_Patch
     }
 }
 
-// Hard override: if the game resolves the name field through any property,
-// intercept and return our display name directly.
+// The game passes FractionConfig.name through a loc lookup before display.
+// Setting name="" in the injector prevents a bad loc result.
+// These patches are the authoritative source for the displayed name.
 [HarmonyPatch(typeof(FractionConfig), "get_Name")]
 public static class FractionConfig_GetName_Patch
 {
@@ -133,7 +133,6 @@ internal static class TowerDbInjector
         {
             Plugin.Log.LogInfo("[TowerInject] Direct DB injection starting...");
 
-            // 1. Load JSON
             if (!File.Exists(JsonPath))
             {
                 Plugin.Log.LogWarning($"[TowerInject] JSON not found: {JsonPath}");
@@ -146,12 +145,8 @@ internal static class TowerDbInjector
             var data     = jsonData?.array?.FirstOrDefault(x => x.id == "tower");
             if (data == null) { Plugin.Log.LogWarning("[TowerInject] tower entry missing from JSON."); return; }
 
-            Plugin.Log.LogInfo($"[TowerInject] JSON loaded: id={data.id} name={data.name}");
+            Plugin.Log.LogInfo($"[TowerInject] JSON loaded: id={data.id}");
 
-            // 2. Inject localization entry (best-effort, Harmony patch is the real fallback)
-            TryInjectLocKey(data.name, Plugin.TowerDisplayName);
-
-            // 3. Find DB collections
             var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
                 .FirstOrDefault(a => a.GetName().Name == "Hex");
             if (hexAsm == null) { Plugin.Log.LogWarning("[TowerInject] Hex assembly not found."); return; }
@@ -167,13 +162,9 @@ internal static class TowerDbInjector
             if (listObj == null || dictObj == null)
             { Plugin.Log.LogWarning("[TowerInject] bxjw or bxjx missing."); return; }
 
-            Plugin.Log.LogInfo($"[TowerInject] bxjw type = {listObj.GetType().FullName}");
-            Plugin.Log.LogInfo($"[TowerInject] bxjx type = {dictObj.GetType().FullName}");
-
             if (FindByIdInDict(dictObj, "tower") != null || FindByIdInList(listObj, "tower") != null)
             { Plugin.DbInjected = true; Plugin.Log.LogInfo("[TowerInject] tower already in DB."); return; }
 
-            // 4. Get human config as base
             var humanRaw = FindByIdInList(listObj, "human");
             if (humanRaw == null) { Plugin.Log.LogWarning("[TowerInject] human config not found."); return; }
 
@@ -185,16 +176,13 @@ internal static class TowerDbInjector
             var tower = new FractionConfig(IL2CPP.il2cpp_object_new(
                 Il2CppClassPointerStore<FractionConfig>.NativeClassPtr));
 
-            // Store the display name directly — no loc key needed since
-            // the Harmony get_Name patch will always override to TowerDisplayName.
             tower.id            = data.id;
-            tower.name          = Plugin.TowerDisplayName;  // "Tower City" stored directly
+            tower.name          = "";          // empty: prevents loc system showing "Loc:..."
             tower.desc          = data.desc;
             tower.narrativeDesc = data.narrativeDesc;
 
-            Plugin.Log.LogInfo($"[TowerInject] tower.id={tower.id} tower.name={tower.name}");
+            Plugin.Log.LogInfo($"[TowerInject] tower created, id={tower.id}");
 
-            // 5. Add to collections
             var typedList = listObj as Il2CppCollections.List<FractionConfig>
                             ?? new Il2CppCollections.List<FractionConfig>(
                                 ((Il2CppSystem.Object)listObj).Pointer);
@@ -212,38 +200,6 @@ internal static class TowerDbInjector
         {
             Plugin.Log.LogError($"[TowerInject] Injection failed: {ex}");
         }
-    }
-
-    static void TryInjectLocKey(string key, string value)
-    {
-        try
-        {
-            var hexAsm = AppDomain.CurrentDomain.GetAssemblies()
-                .FirstOrDefault(a => a.GetName().Name == "Hex");
-            if (hexAsm == null) return;
-
-            foreach (var type in TrySafeGetTypes(hexAsm))
-            {
-                foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
-                {
-                    if (!typeof(System.Collections.IDictionary).IsAssignableFrom(field.FieldType)) continue;
-                    var dict = field.GetValue(null) as System.Collections.IDictionary;
-                    if (dict == null || !dict.Contains("human_name")) continue;
-
-                    if (!dict.Contains(key))
-                    {
-                        dict[key] = value;
-                        Plugin.Log.LogInfo($"[TowerInject] Injected loc key '{key}' = '{value}' into {type.FullName}.{field.Name}");
-                    }
-                    else
-                        Plugin.Log.LogInfo($"[TowerInject] Loc key '{key}' already present.");
-                    return;
-                }
-            }
-
-            Plugin.Log.LogWarning($"[TowerInject] Could not find loc table for '{key}' (Harmony patch handles display name).");
-        }
-        catch (Exception ex) { Plugin.Log.LogWarning($"[TowerInject] TryInjectLocKey failed: {ex.Message}"); }
     }
 
     public static string GetIdSafe(object cfg)

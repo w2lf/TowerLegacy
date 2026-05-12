@@ -106,9 +106,9 @@ public class Plugin : BasePlugin
         { "tower_select", "Select Tower City" },
     };
 
-    // Will be populated after we know real method names from the dump above.
-    // For now patch ALL (string)->string in Hex but limit to methods whose
-    // declaring type name starts with a lowercase letter (obfuscated classes only).
+    // Patch as Prefix with `return false` on matched keys so the original method
+    // (and its Il2Cpp string marshaling) is never invoked for our keys — this
+    // prevents the OutOfMemoryException re-entrance loop that a Postfix caused.
     static void PatchLocalization()
     {
         try
@@ -118,7 +118,7 @@ public class Plugin : BasePlugin
             if (hexAsm == null) { Log.LogWarning("[LocPatch] Hex assembly not found."); return; }
 
             int patched = 0;
-            var postfix = new HarmonyMethod(typeof(Plugin), nameof(LocPostfix));
+            var prefix = new HarmonyMethod(typeof(Plugin), nameof(LocPrefix));
 
             foreach (var type in hexAsm.GetTypes())
             {
@@ -136,7 +136,7 @@ public class Plugin : BasePlugin
                         if (parms.Length != 1 || parms[0].ParameterType != typeof(string)) continue;
                         if (m.Name.StartsWith("set_") || m.Name.StartsWith("get_")) continue;
 
-                        Harmony.Patch(m, postfix: postfix);
+                        Harmony.Patch(m, prefix: prefix);
                         patched++;
                         Log.LogInfo($"[LocPatch] Patched {type.Name}.{m.Name}");
                     }
@@ -149,7 +149,9 @@ public class Plugin : BasePlugin
         catch (Exception ex) { Log.LogWarning($"[LocPatch] {ex.Message}"); }
     }
 
-    public static void LocPostfix(string __0, ref string __result)
+    // Prefix: return false skips the original entirely for our keys,
+    // so no Il2Cpp string marshaling happens → no re-entrance → no OOM loop.
+    public static bool LocPrefix(string __0, ref string __result)
     {
         try
         {
@@ -157,9 +159,11 @@ public class Plugin : BasePlugin
             {
                 Log.LogInfo($"[LocPatch] Intercepted '{__0}' -> '{val}'");
                 __result = val;
+                return false; // skip original
             }
         }
         catch { }
+        return true; // let original run for everything else
     }
 }
 
